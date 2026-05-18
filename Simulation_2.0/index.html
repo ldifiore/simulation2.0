@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+
+    <head>
+        <link rel="stylesheet" href="./styles/styleSheet.css">
+        <meta charset="UTF-8">
+        <title>simulations.liam.difiore</title>
+        <meta name="description"content="">
+        <meta property="og:title" content="simulations.liam.difiore">
+        <meta property="og:description"content="">
+        <meta property="og:image" content="">
+    </head>
+    <body>
+        <div class="simSpace" id="simSpace">
+
+            <canvas id="canvas"></canvas>
+            
+        </div>
+
+        <div class="UI">
+
+            <div class="timeContainer">
+
+                <div class="timeData">
+                    
+                    <h3 id="realTimeElapsed">totTime: <br><Span id="dataTotTime"></Span>s</h3>
+                    <h3 id="simTimeElapsed">totSimTime: <br><Span id="dataTotSimTime"></Span>s</h3>
+                    <h3 id="timeScaleNum">TimeScale: <br><Span id="dataTimeScale"></Span></h3>
+
+                </div>
+
+                <div class="sliderContainer">
+
+
+
+                    <div class="sliderWithTicks" id="timeSliderWithTicks">
+
+                        <div class="ticks" id="leftTicks" style="writing-mode: vertical-lr; direction: ltr">
+
+                            <legend id="timeScaleTitle">TimeScale</legend>
+                            <legend class="tick">|</legend>
+                            <legend class="tick">|</legend>
+                            <legend class="tick">|</legend>
+                            <legend class="tick">|+e0</legend>
+                            <legend class="tick">|</legend>
+                            <legend class="tick">|</legend>
+                            <legend class="tick">|</legend>
+                            <legend class="tick">|-e3</legend>
+
+                        </div>
+
+                        <div class="slider">
+                            <input type=range class="timeSlider" id="timeScale" orient="vertical" style="writing-mode: vertical-lr; direction: rtl" defaultValue={0} oninput="timeSliderChange(this.value)">
+                        </div>
+
+                    </div>
+
+
+
+                    <div class="sliderWithTicks" id="fpsSliderWithTicks">
+
+                        <div class="slider">
+                            <progress class="fpsSlider" id="fpsBar" value="20" max="180" orient="vertical" style="writing-mode: vertical-lr; direction: rtl"  ></progress>
+                        </div>
+
+                        <div class="ticks" id="rightTicks" style="writing-mode: vertical-lr; direction: ltr">
+
+                            <legend id="fpsScaleTitle">FPS</legend>
+                            <legend class="tick">| 160</legend>
+                            <legend class="tick">| 140</legend>
+                            <legend class="tick">| 120</legend>
+                            <legend class="tick">| 100</legend>
+                            <legend class="tick">| 80</legend>
+                            <legend class="tick">| 60</legend>
+                            <legend class="tick">| 40</legend>
+                            <legend class="tick">| 20</legend>
+
+                        </div>
+                    </div>
+                </div>
+            </div>
+    
+            <div class="data">
+    
+                <header class="simSelector">
+
+                    <button class="dropdown">
+                        <h1 id="currentSimTitle">currentSimTitle</h1>
+                    </button>
+
+                    <div class="dropdown-content">
+                        <div class="dropdown-item">
+                            <button><h2>Particle Space</h2></button>
+                            <div class="sub-dropdown">
+                            <button data-space="Gravity Collision" ><h3>Gravity Collision</h3></button>
+                            <button data-space="Rope" ><h3>Rope</h3></button>
+                            <button data-space="" ><h3>Sub C</h3></button>
+                            </div>
+                        </div>
+
+                        <div class="dropdown-item">
+                            <button><h2>Cell Space</h2></button>
+                            <div class="sub-dropdown">
+                            <button data-space="" ><h3>Option 1</h3></button>
+                            <button data-space="" ><h3>Option 2</h3></button>
+                            </div>
+                        </div>
+
+                        <div class="dropdown-item">
+                            <button><h2>Line Space</h2></button>
+                            <div class="sub-dropdown">
+                            <button data-space="" ><h3>Option 1</h3></button>
+                            <button data-space="" ><h3>Option 2</h3></button>
+                            </div>
+                        </div>
+
+                        <div class="dropdown-item">
+                            <button><h2>Shape Space</h2></button>
+                            <div class="sub-dropdown">
+                            <button data-space="" ><h3>Option 1</h3></button>
+                            <button data-space="" ><h3>Option 2</h3></button>
+                            </div>
+                        </div>
+
+                        <div class="dropdown-item">
+                            <button><h2>Test Space</h2></button>
+                            <div class="sub-dropdown">
+                            <button data-space="" ><h3>Option 1</h3></button>
+                            <button data-space="" ><h3>Option 2</h3></button>
+                            </div>
+                        </div>
+
+                        <div class="dropdown-item">
+                            <button><h2>GPU</h2></button>
+                            <div class="sub-dropdown">
+                            <button data-space="" ><h3>Option 1</h3></button>
+                            <button data-space="" ><h3>Option 2</h3></button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                        
+                </header>
+        
+                <div class="simData">
+
+                    <div class="buttonWrapper" onclick="pauseSim()">
+                        <label for="pause">PAUSE</label>
+                        <button class="simButton" id="pause">
+                        </button>
+                    </div>
+
+                    <div class="buttonWrapper" onclick="resetSim()">
+                        <label for="reset">RESET</label>
+                        <button class="simButton" id="reset">
+                        </button>
+                    </div>
+
+                    <div class="buttonWrapper" onclick="">
+                        <label for="repeat">REPEAT</label>
+                        <button class="simButton" id="repeat">
+                        </button>
+                    </div>
+                    
+                </div>
+    
+            </div>
+
+        </div>
+
+<!-- TOOLS -->
+
+        <script src = "./src/tools/Vector2.js"></script>
+        <script src = "./src/tools/init.js"></script>
+        <script src = "./src/tools/userInputs.js"></script>
+        <script src = "./src/tools/Draws.js"></script>
+        <script src = "./src/tools/simTools.js"></script>
+        
+<!-- TOOLS -->
+
+        
+<!-- SIMULATION SPACES -->
+
+        <script src ="./src/simSpaces/particleSpace/particles.js"></script>
+        <script src ="./src/simSpaces/particleSpace/ParticleSim.js"></script>
+
+<!-- SIMULATION SPACES -->
+
+
+<!-- SIMULATIONS -->
+
+        <script src ="./src/simSpaces/particleSpace/Sims/GravityCollision.js"></script>
+        <script src ="./src/simSpaces/particleSpace/Sims/Rope.js"></script>
+
+
+<!-- SIMULATIONS -->
+
+
+<!-- MAIN LOOP -->
+
+        <script src = "./src/tools/mainLoop.js"></script>
+
+<!-- MAIN LOOP -->
+
+        
+    </body>
+</html>

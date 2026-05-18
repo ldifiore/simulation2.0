@@ -1,0 +1,348 @@
+@font-face {
+    font-family: 'CustomFont'; /* Name your font family */
+    src: url("./fonts/PixelOperator/PixelOperator.ttf"); /* Locate the .ttf file within your directory*/
+}
+
+:root{
+    --color-orange: #f0a400;
+    --color-white: #fff;
+    --color-black: #000;
+    --color-off-white:rgb(234, 228, 213);
+    --color-off-black:rgb(40, 39, 36);
+
+    --background: var(--color-black);
+    --main-color:var(--color-white);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: 'CustomFont', sans-serif; /* Use the font family */
+    font-weight: 100;
+    color: var(--main-color);
+} 
+
+
+body{
+    background-color: var(--background);
+    max-width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: row;
+    gap: 1rem;
+}
+
+    .simSpace{
+        flex: 3;
+        max-height: 99.5%;
+    }
+
+        #canvas{
+            width: 100%;
+            height: 100%;
+        }
+
+    .UI{
+        background-color: var(--background);
+        flex: 1.15;
+        padding: 20px;
+        display: flex;
+        flex-direction: row;
+        gap: 1rem;
+    }
+
+        .timeContainer{
+            background-color: var(--background);
+            flex: 1;
+            padding: 0rem;
+            display: flex;
+            flex-direction: column;
+        }
+
+            .timeData{
+                background-color: var(--background);
+                flex: 1;
+
+                h3{
+                    font-size: 1.5rem;
+                    margin-top: 1rem;
+                    margin-bottom: 1rem;
+                }
+            }
+
+                #timeScaleNum{
+                    margin-bottom: 0;
+                    margin-top: 2rem;
+                }
+
+
+
+
+                
+
+            .sliderContainer{
+                background-color: var(--background);
+                flex: 4;
+                display: flex;
+                flex-direction: row;
+                padding-top: 1rem;
+                justify-content: center;
+            }
+
+                #timeSliderWithTicks{
+                    background-color: var(--background);
+                    flex: 1;
+                    border-top: 6px solid var(--main-color);
+                    border-right: 3px solid var(--main-color);
+                    border-bottom: 6px solid var(--main-color);
+                    display: flex;
+                    flex-direction: row;
+                }
+
+                #fpsSliderWithTicks{
+                    background-color: var(--background);
+                    flex: 1;
+                    border-top: 6px solid var(--main-color);
+                    border-left: 3px solid var(--main-color);
+                    border-bottom: 6px solid var(--main-color);
+                    display: flex;
+                    flex-direction: row;
+                }
+
+
+                .slider{
+                    background-color: var(--background);
+                    min-height: 100%;
+                    flex: 1;
+                    display: flex;
+                }
+
+                    .timeSlider{
+                        margin-top: 10px;
+                        margin-bottom: 10px;
+                        margin-right: 10px;
+                        height: auto;
+                        width: 100%;
+                        flex: 1;
+                        -webkit-appearance: none;
+                        appearance: none; 
+                        overflow: hidden;
+                        background-color: var(--background);
+                    }
+
+                        .timeSlider::-webkit-slider-thumb {
+                            -webkit-appearance: none;
+                            appearance: none; 
+                            height: 0;
+                            box-shadow: 0 1000px 0 1000px var(--main-color);
+                        }
+
+                    .fpsSlider{
+                        margin-top: 10px;
+                        margin-bottom: 10px;
+                        margin-left: 10px;
+                        height: auto;
+                        width: 100%;
+                        flex: 1;
+                        -webkit-appearance: none;
+                        appearance: none; 
+                    }
+
+                        .fpsSlider::-webkit-progress-bar{
+                            background-color: var(--background);
+                        }
+
+                        .fpsSlider::-webkit-progress-value{
+                            background-color: var(--main-color);
+                        }
+
+                        
+
+                    .ticks{
+                        background-color: var(--background);
+                        max-height: 100%;
+                        display: flex;
+                        flex-direction: row ;
+                        margin-top: 10px;
+                        margin-bottom: 10px;
+                        justify-content: space-between;
+                    }
+
+                        #timeScaleTitle{
+                            flex: 1.9;
+                        }
+
+                        #fpsScaleTitle{
+                            flex: .9;
+                        }
+
+                        .tick{
+                            flex: 1;
+                        }
+
+                    
+
+                    
+
+                
+
+
+        .data{
+            background-color: var(--background);
+            flex: 2.5;
+            padding: 0rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            
+        }
+
+            .simSelector{
+                background-color: var(--background);
+                flex: 1;
+                position: relative;
+                display: inline-block;
+            }
+
+                .dropdown{
+                    background-color: var(--background);
+                    border: 4px solid var(--main-color);
+                    width: 100%;
+                    height: 100%;
+                    font-size: 16px;
+                    padding: 1rem;
+
+                    h1{
+                        padding: 15px;
+                        color: var(--background);
+                        background-color: var(--main-color);
+                    }
+                }
+
+                .dropdown-content {
+                    display: none;
+                    position: absolute;
+                    background-color: var(--background);
+                    width: 100%;
+                    z-index: 1;
+                    text-align: center;
+                    border-bottom: 4px solid var(--main-color);
+                    border-left: 4px solid var(--main-color);
+                    border-right: 4px solid var(--main-color);
+
+                    /* add padding around the inside */
+                    padding: 1rem;
+                    box-sizing: border-box; /* so borders + padding don’t break width */
+                }
+
+                .dropdown-content button {
+                    display: block;
+                    width: 100%;       /* full width of dropdown */
+                    padding: 15px 0;   /* spacing inside button */
+                    background-color: var(--background);
+                    border: none;      /* optional, to clean up */
+                    margin: 0;         /* remove margin */
+                    box-sizing: border-box;
+                }
+
+                .dropdown-content button h2{
+                    font-size: 1.75rem;
+                    color: var(--main-color);
+                }
+
+                .simSelector:hover .dropdown{
+                    border: none;
+                    border-top: 4px solid var(--main-color);
+                    border-left: 4px solid var(--main-color);
+                    border-right: 4px solid var(--main-color);
+                }
+
+                .simSelector:hover .dropdown-content {
+                    display: block;
+                }
+
+
+                .dropdown-content button:hover{
+                    background-color: var(--main-color);
+
+                    h2{
+                        color: var(--background);
+                    }
+                }
+
+                    .sub-dropdown {
+                        display: none;
+                        background-color: var(--background);
+                        border-left: 4px solid var(--main-color);
+                        margin-left: 1rem;
+                        padding: 0.5rem;
+                    }
+
+                    .sub-dropdown button {
+                        display: block;
+                        width: 100%;
+                        padding: 10px 0;
+                        background: var(--background);
+                        border: none;
+                        text-align: left;
+                    }
+
+                    .sub-dropdown button h3 {
+                        font-size: 1.5rem;
+                        color: var(--main-color);
+                    }
+
+                    .sub-dropdown button:hover h3 {
+                        color: var(--background);
+                        background: var(--main-color);
+                    }
+
+                
+
+
+
+            .simData{
+                background-color: var(--background);
+                flex: 9;
+                display: grid;
+                grid-template-columns: repeat(3,1fr);
+                justify-content: space-between;
+                align-content: start;
+                padding: 1rem;
+                gap: 1rem; 
+            }
+
+                .buttonWrapper{
+                    width: max-content;
+                    height: min-content;
+                    display: flex;
+                    flex-direction: column;
+                    align-content: start;
+                    justify-content: center;
+                }
+
+                    .simButton{
+                        width: 70px;
+                        height: 70px;
+                        
+                        background-color: var(--background);
+                        border: 5px solid  var(--main-color); 
+                        outline: 20px solid var(--main-color);
+                        outline-offset: -40px;
+                    }
+
+                    .simButton:active {
+                        outline: 20px solid var(--background);
+                      }
+
+
+                .userInfo{
+                    grid-row: 2 / 3;
+                    grid-column: 1 / 4;
+                }
+
+
+legend{
+    font-size: 1.5rem;
+}
