@@ -1,0 +1,3399 @@
+<!doctype html>
+
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebGPU phys sim 0.22 </title>
+    <style>
+    * {
+        margin: 0;
+        padding: 0; 
+        box-sizing: border-box;
+        font-family: 'CustomFont', sans-serif;
+        font-weight: 100;
+        color: rgb(0, 0, 0);
+    } 
+
+    body{
+        background-color: rgb(255, 115, 115);
+        height: 99.7vh;
+        width: 99.7vh;
+        display: flex;
+        flex-direction: row;
+        gap: 0;
+    }
+
+    .simSpace{
+        background-color: rgb(0, 0, 0);
+        flex: 3;
+    }
+
+
+    #fpsCounter {
+        position: absolute;
+        top: 10px;
+        right: 15px;
+        background: rgba(0, 0, 0, 0.6);
+        color: white;
+        font-size: 14px;
+        padding: 5px 10px;
+        border-radius: 8px;
+        font-family: monospace;
+    }
+    </style>
+</head>
+<body>
+    <div class="simSpace" id="simSpace">
+
+            <canvas id="simCanvas"></canvas>
+            
+    </div>
+
+    <div id="fpsCounter">FPS: 0</div>
+
+    <script type="module">
+
+        class Vector2{
+            constructor(x,y){
+                this.x = x;
+                this.y = y;
+            }
+        }
+
+        const simCanvas = document.getElementById("simCanvas");
+        const fpsCounter = document.getElementById("fpsCounter");
+        
+        simCanvas.width = document.getElementById('simSpace').clientWidth ;
+        simCanvas.height = document.getElementById('simSpace').clientHeight ;
+
+        var windowSize_px = new Vector2(simCanvas.width,simCanvas.height);
+            console.log('window width: '+ windowSize_px.x +'px    window height: '+ windowSize_px.y +'px');
+
+        var windowSize_m = new Vector2( .175 , .175);
+            console.log('world window width: '+ windowSize_m.x.toFixed(6) * 100 +'cm    world window height: '+ windowSize_m.y.toFixed(6) * 100 +'cm');
+
+        var windowAspectRatio = windowSize_px.x / windowSize_px.y;
+            console.log('window aspect ratio: '+ windowAspectRatio);
+
+        var simAspectRatio = Math.round(windowAspectRatio*2)/2;
+            console.log('sim aspect ratio: '+ simAspectRatio);
+
+        const LATTICE_DEPTH = 6;
+        const LATTICE_X = 2**LATTICE_DEPTH;
+        const LATTICE_Y = 2**LATTICE_DEPTH;
+        const ATOM_SEPERATION = 1.11 * 2 ;
+
+        var simSize_A = new Vector2((LATTICE_X )* ATOM_SEPERATION, (LATTICE_Y )* ATOM_SEPERATION);
+            console.log('sim size(m): [x: ' + (simSize_A.x).toFixed(5) + 'A , y: ' + (simSize_A.y).toFixed(5) + 'A ]' );
+
+        var simSize_px = new Vector2(simCanvas.width, simCanvas.height);
+            console.log('sim size(px): [x: ' + simSize_px.x + 'px , y: ' + simSize_px.y + 'px ]' );
+
+        var simHalf_A = new Vector2(simSize_A.x / 2,simSize_A.y / 2);
+            console.log('half x: '+ simHalf_A.x  +'A     half y: '+ simHalf_A.y  +'A');
+        
+        var simHalf_px = new Vector2(simSize_px.x / 2,simSize_px.y / 2);
+            console.log('half x: '+ simHalf_px.x +'px    half y: '+ simHalf_px.y+'px');
+
+        var treeDepth_int = 10;
+            console.log('grid depth = '+ treeDepth_int);
+
+        var gridSize_int = new Vector2(2**treeDepth_int,2**treeDepth_int);
+            console.log('x: '+ gridSize_int.x +'    y: '+ gridSize_int.y );   
+        
+        var gridResolution = gridSize_int.x * gridSize_int.y
+            console.log('grid resolution = '+ gridSize_int.x + 'x' + gridSize_int.y + ' = ' + gridResolution);
+
+        var gridCellSize_A = simSize_A.x / gridSize_int.x;
+            console.log('grid cell size = '+ gridCellSize_A +'A');
+
+        const PIXEL_SIZE_A = simSize_A.x / simSize_px.x ;
+            console.log('pixel size = '+ PIXEL_SIZE_A +'A');
+
+        
+
+        let step = 0;
+        let frames = 0;
+        let lastT_ms = performance.now();
+        let dt_ms = performance.now() - lastT_ms;
+        let dt_s = dt_ms/1000;
+        let fps = 1/dt_s;
+        let fpsAccumulator = 0;
+        let frameCountForFps = 0;
+        let frameSeed = Math.random(); 
+        let simSeed = Math.random(); 
+
+
+
+                                                                //TO ADD PERFORMANCE UNCOMMENT
+        const adapter = await navigator.gpu.requestAdapter(/*{powerPreference: "high-performance"}*/);
+
+        if (!adapter) {
+            throw new Error("No appropriate GPUAdapter found.");
+        }
+
+        if (!adapter.features.has('subgroups')) {
+            alert("Your device does not support WebGPU subgroups! The sim will not run.");
+        }
+
+        const device = await adapter.requestDevice({
+            requiredFeatures: ['subgroups']
+        });
+
+        const context = simCanvas.getContext("webgpu");
+        const simCanvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+            device: device,
+            format: simCanvasFormat,
+            alphaMode: 'premultiplied',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
+        });
+
+        const persistentTexture = device.createTexture({
+            size: [simCanvas.width, simCanvas.height],
+            format: simCanvasFormat,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+        });
+
+
+//INITIAL CONDITIONS
+
+        const WORKGROUP_SIZE = 32;
+        const DISPATCH_LAYERS =1;
+
+        const FRAME_DELAY_MS = 0;
+        const SET_DT_S = 1;
+        var timeFactor = 1e-3;
+
+
+        const NUM_OF_ATOMS = LATTICE_X * LATTICE_Y  ;
+
+        const freeElectrons = Math.floor(NUM_OF_ATOMS * 0 + 0 );
+        
+        const ELECTRON_CHARGE = - 1.0;
+        const ELECTRON_MASS = 1.0;
+        const ELECTRON_RADIUS = 2.82e-5;
+        const COULOMB_CONST = 253.263 ;
+        const BOLTZMANN_CONST = 8.61733e-5;
+        const KINETIC_CONST = 0.0284329;
+
+        const atomicRadius = 1.11;
+        const scatteringRadius = .5;
+
+        
+        const WALL_DAMPING = .8;
+        const MAX_SPEED = 1e3;
+        const ATOM_MAX_SPEED = 8e2;
+        const THETA = .7;
+        var springConst = -9.2e18;
+        var voltage = 0.0 ;
+        var externalEField = voltage / simSize_A.x;
+        var magneticField = 0.0;
+
+
+        var draw_electrons = true;
+        const ELECTRON_VISUAL_SIZE = Math.max(PIXEL_SIZE_A * 3, ELECTRON_RADIUS);
+        var draw_atoms = true;
+        const ATOM_VISUAL_SIZE = Math.max(PIXEL_SIZE_A * 2, ELECTRON_RADIUS);
+        const TRACERS = false;
+        const DRAW_GRID = true;
+        var cellType = "temp";
+        const FILL_BACKGROUD = true;
+        const DRAW_GRID_DEPTH = 6;
+        const BIN_ALPHA_FACTOR = 3e-0;
+        const TEMP_ALPHA_FACTOR = 1e-11;
+
+
+
+        if(SET_DT_S > 0){
+                dt_s = SET_DT_S ;
+        }
+
+
+        class Atom{
+            constructor(nuclearMass,atomicRadius,scatteringRadius,nucleusCharge,inactiveShellCharge,bindEnergy,activeElectrons,polarizability){
+                this.nuclearMass = nuclearMass;
+                this.atomicRadius = atomicRadius;
+                this.scatteringRadius = scatteringRadius;
+                this.nucleusCharge = nucleusCharge;
+                this.inactiveShellCharge = inactiveShellCharge;
+                this.bindEnergy = bindEnergy;
+                this.activeElectrons = activeElectrons; 
+                this.polarizability = polarizability;
+            }
+        }
+
+        const ATOMS = new Array();
+
+        ATOMS.push(new Atom(51156.05 , 1.11, 1.11/4 , 14, -13 , 1.12  , 1 , 3.7));
+        ATOMS.push(new Atom(20089.18 , 0.87, 1.11/4 , 5 , -5  , 1.08  , 0 , 0.16));
+        ATOMS.push(new Atom(56425.34 , 1.23, 1.11/4 , 15, -14 , 0.045 , 1 , 3.67));
+        ATOMS.push(new Atom(115837.27, 1.28, 1.11/10, 29, -28 , 0.0   , 1 , 16));
+        ATOMS.push(new Atom(165763.25, 2.16, 1.11/2 , 40, -39 , 5.0   , 1 , 17.9));
+
+
+        class Material{
+            constructor(base,dopant,dopingRatio){
+                this.base = base;
+                this.dopant = dopant;
+                this.dopingRatio = dopingRatio;
+            }
+        }
+
+        const MATERIALS = new Array();
+
+
+        MATERIALS.push(new Material(0,1,0.9));
+        MATERIALS.push(new Material(0,1,.1));
+        MATERIALS.push(new Material(0,2,0.05));
+        MATERIALS.push(new Material(0,2,.1));
+        MATERIALS.push(new Material(0,3,1.0));
+        MATERIALS.push(new Material(0,4,1.0));
+
+        
+        const NUM_QUADS = (4**(treeDepth_int + 1) - 1) / 3;
+
+
+        var materialGrid = new Array(NUM_OF_ATOMS);
+        var atomTypeArray = new Array(NUM_OF_ATOMS);
+        var boundElectrons = 0;
+
+        for(let i = 0; i < NUM_OF_ATOMS ; i++){
+
+            let col = i % LATTICE_X;
+            let row = Math.floor(i / LATTICE_X);
+        
+            if (col <= Math.floor(20*LATTICE_X/20)){
+                materialGrid[i] = 0;
+            }else if (col < Math.floor(2*LATTICE_X/20)){
+                materialGrid[i] = 1;
+            }else if (col < Math.floor(10*LATTICE_X/20)){
+                materialGrid[i] = 0;
+            }else if (col < Math.floor(18*LATTICE_X/20)){
+                materialGrid[i] = 2;
+            }else if (col < Math.floor(19*LATTICE_X/20)){
+                materialGrid[i] = 3;
+            }else if (col <= Math.floor(20*LATTICE_X/20)){
+                materialGrid[i] = 4;
+            }else{
+                materialGrid[i] = 1;
+            }
+        
+        }
+
+        for(let i = 0; i < NUM_OF_ATOMS ; i++){
+
+            let material = MATERIALS[materialGrid[i]];
+            let atomType = material.dopingRatio < Math.random() ? material.base : material.dopant;
+            atomTypeArray[i] = atomType;
+            boundElectrons += ATOMS[atomType].activeElectrons;
+            
+        }
+
+        const NUM_OF_ELECTRONS = boundElectrons + freeElectrons;
+
+        //(pos0x+pos0y+posx+posy+velx+vely+e1+e2+e3+e4+mass+coreCharge+KE+PE+temperature+radius+posElx+posEly+elCount)
+        const NUM_OF_ATOMS_VARS = 20; 
+        const atoms = new ArrayBuffer(NUM_OF_ATOMS * NUM_OF_ATOMS_VARS * 4);
+        const atoms_f32 = new Float32Array(atoms);
+        const atoms_u32 = new Uint32Array(atoms);
+
+
+        const NUM_OF_ELECTRON_VARS = 8; //(posx+posy+velx+vely+mortID+localID+pad1+pad2)
+        const electrons = new ArrayBuffer(NUM_OF_ELECTRONS * NUM_OF_ELECTRON_VARS * 4);
+        const electrons_f32 = new Float32Array(electrons);
+        const electrons_u32 = new Uint32Array(electrons);
+
+        var eID = 0;
+
+        for(let i = 0; i < NUM_OF_ATOMS ; i++){
+            let atomOffset = i * NUM_OF_ATOMS_VARS;
+            let atomType = atomTypeArray[i];
+            let col = i % LATTICE_X;
+            let row = Math.floor(i / LATTICE_X);
+            let cellx = -simHalf_A.x + (col * ATOM_SEPERATION) + (ATOM_SEPERATION / 2) ;
+            let celly = -simHalf_A.y + (row * ATOM_SEPERATION) + (ATOM_SEPERATION / 2) ;
+            atoms_f32[atomOffset + 0] = cellx ; //pos0x
+            atoms_f32[atomOffset + 1] = celly ; //pos0y
+            if (col < LATTICE_X){
+                atoms_f32[atomOffset + 2] = cellx + (Math.random()-.5) * ATOM_SEPERATION * 0.0000001 + ATOM_SEPERATION * 0.0; //posx
+                atoms_f32[atomOffset + 3] = celly + (Math.random()-.5) * ATOM_SEPERATION * 0.0000001 + ATOM_SEPERATION * 0.0  ; //posy
+            }else{
+                atoms_f32[atomOffset + 2] = cellx + (Math.random()-.5) * ATOM_SEPERATION * 0.00001 + ATOM_SEPERATION * 0.0; //posx
+                atoms_f32[atomOffset + 3] = celly + (Math.random()-.5) * ATOM_SEPERATION * 0.00 + ATOM_SEPERATION * 0.0  ; //posy
+            }
+            
+            atoms_f32[atomOffset + 4] = (Math.random()-.5) * 0e6 + 0.0; //velx
+            atoms_f32[atomOffset + 5] = (Math.random()-.5) * 0e6 + 0.0; //vely
+            atoms_f32[atomOffset + 6] = atoms_f32[atomOffset + 2]; //negPolex
+            atoms_f32[atomOffset + 7] = atoms_f32[atomOffset + 3]; //negPoley
+            atoms_f32[atomOffset + 9] = ATOMS[atomType].nucleusCharge;
+            atoms_f32[atomOffset + 10] = ATOMS[atomType].inactiveShellCharge;
+            atoms_f32[atomOffset + 11] = atomicRadius;//atomic radius
+            atoms_f32[atomOffset + 12] = ATOMS[atomType].scatteringRadius;//scattering radius
+            atoms_f32[atomOffset + 13] = ATOMS[atomType].nuclearMass; //mass
+            atoms_f32[atomOffset + 14] = ATOMS[atomType].bindEnergy; //bindEnergy 
+            atoms_f32[atomOffset + 15] = ATOMS[atomType].polarizability; //polarizability
+            atoms_f32[atomOffset + 16] = 0; //Kinetic energy
+            atoms_f32[atomOffset + 17] = 0; //Potential energy
+            atoms_f32[atomOffset + 18] = 0; //Temperature
+            atoms_f32[atomOffset + 19] = 0; //pad2
+
+            if(ATOMS[atomType].activeElectrons == 1){
+                let electronOffset = eID * NUM_OF_ELECTRON_VARS;
+                
+                electrons_f32[electronOffset + 0] = atoms_f32[atomOffset + 2] ; //posx
+                electrons_f32[electronOffset + 1] = atoms_f32[atomOffset + 3]; //posy
+                electrons_f32[electronOffset + 2] = atoms_f32[atomOffset + 4]; //velx
+                electrons_f32[electronOffset + 3] = atoms_f32[atomOffset + 5]; //vely
+                const x = electrons_f32[electronOffset + 0] + simHalf_A.x;
+                const y = electrons_f32[electronOffset + 1] + simHalf_A.y;
+                const x8 = Math.min(Math.max(Math.floor(x / gridCellSize_A), 0), gridSize_int.x-1);
+                const y8 = Math.min(Math.max(Math.floor(y / gridCellSize_A), 0), gridSize_int.y-1);
+
+                let morton = 0;
+                for (let j = 0; j < treeDepth_int; j++) {
+                    morton |= ((y8 >> j) & 1) << (2*j + 1);
+                    morton |= ((x8 >> j) & 1) << (2*j);
+                }
+
+                electrons_u32[electronOffset + 4] = morton; //grid ID
+                electrons_u32[electronOffset + 5] = 0 ; //inner bin ID
+                electrons_u32[electronOffset + 6] = i ; //atom ID
+                electrons_f32[electronOffset + 7] = 0 ; //pad2
+
+                atoms_u32[atomOffset + 8] = eID; //activeElectron
+
+                eID ++;
+            }else{
+                atoms_u32[atomOffset + 8] = NUM_OF_ELECTRONS + 1; //activeElectron
+            }   
+        }
+
+
+
+        
+
+
+        console.log("number of atoms: " + NUM_OF_ATOMS);
+        console.log("number of electron: " + NUM_OF_ELECTRONS)
+
+
+        const SortData = new Uint32Array(NUM_OF_ELECTRONS * 2);
+        const BinData = new Uint32Array(gridResolution * 2);
+        const BHQuadSize = NUM_QUADS * 10 * 4;
+        const numBlocks = Math.ceil(gridResolution / 256);
+
+        console.log('atom buffer size: ' + atoms.byteLength * 1e-6 + 'MB')
+
+//MEMORY HANDLING
+
+
+    /*CREATE DATA TO STORE
+
+        this what ever data you want the gpu to have access to
+
+    */  
+        const vertices = new Float32Array([
+        //   X,    Y,
+
+            -1, -1, // Square Triangle 1
+            1, -1,
+            1,  1,
+
+            -1, -1, // Square Triangle 2
+            1,  1,
+            -1,  1,
+
+            -1.7321 , -1, // Circle Triangle
+            1.7321 , -1,
+            0,  2.0,
+
+        ]);
+
+        const GLOBALS_LENGTH = 28;
+
+        var globals = new ArrayBuffer(GLOBALS_LENGTH * 4);
+        var f32 = new Float32Array(globals);
+        var u32 = new Uint32Array(globals);
+
+        f32[0] = dt_s; //dt_s
+        f32[1] = frameSeed; //frameSeed
+        f32[2] = PIXEL_SIZE_A; //PIXEL_SIZE_A
+        f32[3] = gridCellSize_A; //gridCellSize_A
+
+        f32[4] = simSize_A.x; //simSize_A.x
+        f32[5] = simSize_A.y; //simSize_A.y
+
+        f32[6] = simHalf_A.x; //simHalf_A.x
+        f32[7] = simHalf_A.y; //simHalf_A.y
+
+        u32[8] = gridSize_int.x; //gridSize_int.x
+        u32[9] = gridSize_int.y; //gridSize_int.y
+
+        f32[10] = ELECTRON_MASS ; //eMass
+        f32[11] = ELECTRON_CHARGE; //eCharge
+        f32[12] = ELECTRON_RADIUS; //eRadius
+        f32[13] = ELECTRON_VISUAL_SIZE; //eVisRadius
+
+        u32[14] = treeDepth_int; //treeDepth
+
+        u32[15] = 0; //currentLevel
+        u32[16] = 0; //levelOffset
+        u32[17] = 0; //childOffset
+        u32[18] = 0; //nodesThisLevel
+        u32[19] = 0; //leafOffset
+
+        u32[20] = DRAW_GRID_DEPTH; //draw_grid_depth
+        u32[21] = (4**DRAW_GRID_DEPTH - 1) / 3; //draw_grid_start
+
+        u32[22] = 0; //EMPTY2
+        u32[23] = NUM_OF_ATOMS; 
+
+        f32[24] = ATOM_VISUAL_SIZE; //atomVisRadius
+        f32[25] = ATOM_SEPERATION; 
+        u32[26] = LATTICE_X; 
+        u32[27] = LATTICE_Y; 
+
+
+    /*BUFFER LAYOUT
+            
+        tells the gpu how to breakup and read the buffer data and what location gate to send the data through when sending it to the shader
+
+            arrayStride:
+                -tells the gpu how many bytes belong to each ve
+                -in units of bytes(8 bits) example: format = float32x2 = 32*2 bits = 64 bits = 64/8bits = 8 bytes => arrayStride: 8)
+            format:
+                -tells the gpu what kind of data to expect in each Stride
+                -
+            offset:
+                -
+            shaderLocation:
+                -
+    */
+        
+    const vertexBufferLayout = {
+            arrayStride: 8, 
+            attributes: [{
+                format: "float32x2",
+                offset: 0,
+                shaderLocation: 0, 
+            }],
+        };
+
+
+
+    /*CREATE BUFFERS
+    
+        create's a buffer object which tells the gpu how to handle storage the buffer is a certain size that can be 
+        used in different ways by the gpu
+
+        -buffer object defined: const exampleBuffer = device.createBuffer({ label: ,size: ,usage: ,});
+
+            label:
+                -used only by javascript for debugging
+            size: 
+                -how much storage space needs to be allocated in the gpu for the buffer so that it fits once written
+            usage:
+                -how the data in the storage buffer is going to be used so that the optimal storage location in the gpu can be picked
+
+                -storage types
+                    -STORAGE:   Shaders can read/write data arbitrarily (like compute buffers).
+                    -UNIFORM:   Shaders can read constant data (read-only).
+                    -COPY_SRC:  Can be copied from (as a data source).
+                    -COPY_DST:  Can be copied into (as a data destination).
+                    -INDEX:     Used as index data in rendering.
+                    -VERTEX:    Used as vertex data in rendering.
+
+    */
+        
+        const vertexBuffer = device.createBuffer({
+            label: "electron vertices",
+            size: vertices.byteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+
+        const globalsUniformBuffer = device.createBuffer({
+            label: "global constants and what not",
+            size: globals.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        const ElectronStorageBuffer = [
+            device.createBuffer({
+                label: "Electron data A",
+                size: electrons.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            }),
+            device.createBuffer({
+                label: "Electron data B",
+                size: electrons.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            })
+        ];
+
+        const ElectronHolderStorageBuffer = device.createBuffer({
+            label: "electron holder array for movement",
+            size: electrons.byteLength,
+            usage: GPUBufferUsage.STORAGE,
+        });
+
+        const AtomStorageBuffer = [
+            device.createBuffer({
+                label: "Atom data A",
+                size: atoms.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            }),
+            device.createBuffer({
+                label: "Atom data B",
+                size: atoms.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            })
+        ];
+
+        const SortDataStorageBuffer = device.createBuffer({
+            label: "inner bin ids and movenemnt arrays",
+            size: SortData.byteLength,
+            usage: GPUBufferUsage.STORAGE,
+        });
+
+        const BinDataStorageBuffer = device.createBuffer({
+            label: "bin sizes and bin starting positions",
+            size: BinData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+        const BlockSumStorageBuffer = device.createBuffer({
+            label: "block sums for prefix scan",
+            size: Math.max(numBlocks * 4, 256), // 4 bytes per u32. Ensure min size.
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+
+        const BHQuadStorageBuffer = device.createBuffer({
+            label: 'Barnes-hut Quadtree buffer',
+            size: BHQuadSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+
+
+
+
+
+
+    /*WRITE TO BUFFERS
+            
+        fills the buffers we have just created with their corresponding data
+
+        -write to buffer defined: device.queue.writeBuffer( receiving buffer , buffer offset , data)
+
+            receiving buffer: 
+                -is the buffer that will receive this data 
+            buffer offset:
+                -where in the buffer to start writing the data 
+                -example: data = [1,2,3,4,5], offset = 2, buffer = [0,0,1,2,3,4,5] or [0,0,1,2,3] (not sure) (guess it depends on how large the buffer is)
+            data:
+                -data that you want in the buffer
+            
+    */
+        
+        device.queue.writeBuffer(vertexBuffer, 0, vertices);
+
+        device.queue.writeBuffer(globalsUniformBuffer, 0, globals);
+
+        device.queue.writeBuffer(ElectronStorageBuffer[0], 0, electrons);
+
+        device.queue.writeBuffer(AtomStorageBuffer[0], 0, atoms);
+        device.queue.writeBuffer(AtomStorageBuffer[1], 0, atoms);
+
+
+
+
+
+//ROUTING HANDLING
+
+
+    /*BIND GROUPS LAYOUT
+
+        creates a schematic for bind groups which tells the shaders what types of data they will have access to 
+
+        -bind group layout object defined: const bindGroupLayout = device.createBindGroupLayout({label: ,entries: [{ 
+                binding: 0, visibility: , buffer: {type:}}, 
+                {binding: 1, , }] 
+        }); 
+
+            -label:
+                -used only by javascript for debugging
+            -entries:
+                -stores each different bind group
+            -binding:
+                -a name/label/id that the gpu uses to use the bind group for read or write operations
+            -visibility:
+                -what shaders have access to that bind group
+            -buffer(type):
+                -what type of buffer the bind group will be routing
+    */
+        
+
+        const ComputeBindGroupLayout = device.createBindGroupLayout({
+            label: "Compute Bind Group Layout",
+            entries: [{
+                binding: 0,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: {type: "uniform"}
+            }, {
+                binding: 1,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "read-only-storage"}
+            }, {
+                binding: 2,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 3,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 4,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 5,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "read-only-storage"}
+            }, {
+                binding: 6,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 7,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }]
+        });
+
+        const SortBindGroupLayout = device.createBindGroupLayout({
+            label: "sort electronss into mort bins",
+            entries: [{
+                binding: 0,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: {type: "uniform"}
+            }, {
+                binding: 1,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 2,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 3,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 4,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 5,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 6,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }]            
+        });
+
+        const BHQuadBindGroupLayout = device.createBindGroupLayout({
+            label: "fill barnes-hut quadtree",
+            entries: [{
+                binding: 0,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: {type: "uniform"}
+            }, {
+                binding: 1,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage"}
+            }, {
+                binding: 2,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "read-only-storage"}
+            }, {
+                binding: 3,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "read-only-storage"}
+            }, {
+                binding: 4,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "read-only-storage"}
+            }]            
+        });
+
+
+        const RenderBindGroupLayout = device.createBindGroupLayout({
+            entries: [{ 
+                binding: 0, 
+                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+                buffer: { type: "uniform" } 
+            }, {
+                binding: 1, 
+                visibility: GPUShaderStage.VERTEX| GPUShaderStage.FRAGMENT, 
+                buffer: { type: "read-only-storage" } 
+            }, {
+                binding: 2,
+                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+                buffer: { type: "read-only-storage"}
+            }, {
+                binding: 3,
+                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+                buffer: { type: "read-only-storage"}
+            }]
+        });
+
+
+        
+
+    /*CREATE BIND GROUPS
+
+        creates bindgroups and assigns a layout and assignes a specific buffer to each bind group
+
+        -bind group object defined: const bindGroup = device.createBindGroup({ label: , layout: , entries: 
+            [{ binding: 0, resource: { buffer: }}, 
+            {binding: 1 , }], 
+        });
+
+            -label:
+                -used only by javascript for debugging
+            -entries:
+                -stores each different bind group
+            -binding:
+                -a name/label/id that the gpu uses to use the bind group for read or write operations inside shaders
+            -resource(buffer):
+                -buffer assigned to bind group to route
+    */
+        
+        
+        const ComputeBindGroups = [
+            device.createBindGroup({
+                label: "compute bind group A ",
+                layout: ComputeBindGroupLayout ,
+                entries: [{
+                    binding: 0,
+                    resource: { buffer: globalsUniformBuffer }
+                }, {
+                    binding: 1,
+                    resource: { buffer: ElectronStorageBuffer[0] }
+                }, {
+                    binding: 2,
+                    resource: { buffer: ElectronStorageBuffer[1] }
+                }, {
+                    binding: 3,
+                    resource: { buffer: BinDataStorageBuffer }
+                }, {
+                    binding: 4,
+                    resource: { buffer: SortDataStorageBuffer }
+                }, {
+                    binding: 5,
+                    resource: { buffer: BHQuadStorageBuffer }
+                }, {
+                    binding: 6,
+                    resource: { buffer: AtomStorageBuffer[0] }
+                }, {
+                    binding: 7,
+                    resource: { buffer: AtomStorageBuffer[1] }
+                }],
+            }),
+            device.createBindGroup({
+                label: "compute bind group B ",
+                layout: ComputeBindGroupLayout ,
+                entries: [{
+                    binding: 0,
+                    resource: { buffer: globalsUniformBuffer }
+                }, {
+                    binding: 1,
+                    resource: { buffer: ElectronStorageBuffer[1] }
+                }, {
+                    binding: 2,
+                    resource: { buffer: ElectronStorageBuffer[0] }
+                }, {
+                    binding: 3,
+                    resource: { buffer: BinDataStorageBuffer }
+                }, {
+                    binding: 4,
+                    resource: { buffer: SortDataStorageBuffer }
+                }, {
+                    binding: 5,
+                    resource: { buffer: BHQuadStorageBuffer }
+                }, {
+                    binding: 6,
+                    resource: { buffer: AtomStorageBuffer[1] }
+                }, {
+                    binding: 7,
+                    resource: { buffer: AtomStorageBuffer[0] }
+                }],
+            })
+        ];
+
+        const SortBindGroups = [
+            device.createBindGroup({
+                label: "sort bind group A ",
+                layout: SortBindGroupLayout ,
+                entries: [{
+                    binding: 0,
+                    resource: { buffer: globalsUniformBuffer }
+                }, {
+                    binding: 1,
+                    resource: { buffer: BinDataStorageBuffer }
+                }, {
+                    binding: 2,
+                    resource: { buffer: SortDataStorageBuffer }
+                }, {
+                    binding: 3,
+                    resource: { buffer: ElectronHolderStorageBuffer }
+                }, {
+                    binding: 4,
+                    resource: { buffer: ElectronStorageBuffer[1] }
+                }, {
+                    binding: 5,
+                    resource: { buffer: BlockSumStorageBuffer }
+                }, {
+                    binding: 6,
+                    resource: { buffer: AtomStorageBuffer[1] }
+                }],
+            }),
+            device.createBindGroup({
+                label: "sort bind group B ",
+                layout: SortBindGroupLayout ,
+                entries: [{
+                    binding: 0,
+                    resource: { buffer: globalsUniformBuffer }
+                }, {
+                    binding: 1,
+                    resource: { buffer: BinDataStorageBuffer }
+                }, {
+                    binding: 2,
+                    resource: { buffer: SortDataStorageBuffer }
+                }, {
+                    binding: 3,
+                    resource: { buffer: ElectronHolderStorageBuffer }
+                }, {
+                    binding: 4,
+                    resource: { buffer: ElectronStorageBuffer[0] }
+                }, {
+                    binding: 5,
+                    resource: { buffer: BlockSumStorageBuffer }
+                }, {
+                    binding: 6,
+                    resource: { buffer: AtomStorageBuffer[0] }
+                }],
+            })
+        ];
+
+        const BHQuadBindGroups = [
+            device.createBindGroup({
+                label: "barnes-hut quadtree bind group A ",
+                layout: BHQuadBindGroupLayout ,
+                entries: [{
+                    binding: 0,
+                    resource: { buffer: globalsUniformBuffer }
+                }, {
+                    binding: 1,
+                    resource: { buffer: BHQuadStorageBuffer }
+                }, {
+                    binding: 2,
+                    resource: { buffer: ElectronStorageBuffer[1] }
+                }, {
+                    binding: 3,
+                    resource: { buffer: BinDataStorageBuffer }
+                }, {
+                    binding: 4,
+                    resource: { buffer: AtomStorageBuffer[1] }
+                }],
+            }),
+            device.createBindGroup({
+                label: "barnes-hut quadtree bind group B ",
+                layout: BHQuadBindGroupLayout ,
+                entries: [{
+                    binding: 0,
+                    resource: { buffer: globalsUniformBuffer }
+                }, {
+                    binding: 1,
+                    resource: { buffer: BHQuadStorageBuffer }
+                }, {
+                    binding: 2,
+                    resource: { buffer: ElectronStorageBuffer[0] }
+                }, {
+                    binding: 3,
+                    resource: { buffer: BinDataStorageBuffer }
+                }, {
+                    binding: 4,
+                    resource: { buffer: AtomStorageBuffer[0] }
+                }],
+            })
+        ];
+
+        const RenderBindGroups = [
+            device.createBindGroup({
+                layout: RenderBindGroupLayout,
+                entries: [{ 
+                    binding: 0, 
+                    resource: { buffer: globalsUniformBuffer } 
+                }, { 
+                    binding: 1, 
+                    resource: { buffer: ElectronStorageBuffer[0] } 
+                }, {
+                    binding: 2,
+                    resource: { buffer: BHQuadStorageBuffer }
+                }, {
+                    binding: 3,
+                    resource: { buffer: AtomStorageBuffer[0] }
+                }],
+            }),
+            device.createBindGroup({
+                layout: RenderBindGroupLayout,
+                entries: [{ 
+                    binding: 0, 
+                    resource: { buffer: globalsUniformBuffer } 
+                }, { 
+                    binding: 1, 
+                    resource: { buffer: ElectronStorageBuffer[1] } 
+                }, {
+                    binding: 2,
+                    resource: { buffer: BHQuadStorageBuffer }
+                }, {
+                    binding: 3,
+                    resource: { buffer: AtomStorageBuffer[1] }
+                }],
+            })
+        ];
+
+
+
+
+        
+    /*PIPELINE LAYOUT
+    
+        picks which bind group layout to use (in case of multiple)
+
+        -pipeline layout object defined: const pipelineLayout = device.createPipelineLayout({label: , bindGroupLayouts: [ ],});
+
+            -label:
+                -used only by javascript for debugging
+            -bindGroupLayouts: 
+                -pick which bind group/groups to use
+    
+    */
+        
+        const ComputePipelineLayout = device.createPipelineLayout({
+            label: "Compute pipeline layout",
+            bindGroupLayouts: [ ComputeBindGroupLayout ],
+        });
+
+        const SortPipelineLayout = device.createPipelineLayout({
+            label: "Sort pipeline layout",
+            bindGroupLayouts: [ SortBindGroupLayout ],
+        });
+
+        const BHQuadPipelineLayout = device.createPipelineLayout({
+            label: "barnes-hut quadtree pipeline layout",
+            bindGroupLayouts: [ BHQuadBindGroupLayout ],
+        });
+
+        const RenderPipelineLayout = device.createPipelineLayout({
+            label: "draw some stuff or sumptin",
+            bindGroupLayouts: [ RenderBindGroupLayout ],
+        });
+
+
+
+
+//SHADERS
+
+
+    /*SIMULATION SHADER
+
+    */
+        
+
+        const ComputeShaderModule = device.createShaderModule({
+            label: "Compute shader",
+            code: `
+
+                struct Globals {
+                    deltaTime: f32,
+                    seed: f32,
+                    pixelSize: f32,
+                    cellSize: f32,
+                    simSize: vec2f,
+                    simHalf: vec2f,
+                    gridRes: vec2u,
+                    eMass: f32,
+                    eCharge: f32,
+                    eRadius: f32,
+                    eVisRadius: f32,
+                    treeDepth: u32,
+                    currentLevel: u32,
+                    levelOffset: u32,
+                    childOffset: u32,
+                    nodesThisLevel: u32,
+                    leafOffset: u32,
+                    draw_grid_depth: u32,
+                    draw_grid_start: u32,
+                    EMPTY2: u32,
+                    atomCount: u32,
+                    atomVisRadius: f32,
+                    latticeSpacing: f32,
+                    latticeSize: vec2u,
+                };
+
+                struct Electron {
+                    pos: vec2f,
+                    vel: vec2f,
+                    mortID: u32,
+                    localID: u32,
+                    atomID: u32,
+                    pad2: f32,
+                };
+
+                struct Atom {
+                    initPos: vec2f,
+                    pos: vec2f,
+                    velXu: atomic<u32>,
+                    velYu: atomic<u32>,
+                    negPole: vec2f,
+                    eID: atomic<u32>,
+                    coreCharge: f32,
+                    shellCharge: f32,
+                    atomicRadius: f32,
+                    scatRadius: f32,
+                    mass: f32,
+                    bindEnergy: f32,
+                    polarizability: f32,
+                    kinE: f32,
+                    potE: f32,
+                    temp: f32,
+                    pad2: f32,
+                };
+
+                struct BinData {
+                    size: atomic<u32>,
+                    start: u32,
+                };
+
+                struct BHQuad {
+                    posCenter: vec2f,
+                    posCharge: f32,
+                    posCount: u32,
+                    negCenter: vec2f,
+                    negCharge: f32,
+                    negCount: u32,
+                    temp: f32,
+                    Efield: f32,
+                };
+
+
+                @group(0) @binding(0) var<uniform> globals : Globals;
+                @group(0) @binding(1) var<storage, read> electronsIn : array<Electron>;
+                @group(0) @binding(2) var<storage, read_write> electronsOut : array<Electron>;
+                @group(0) @binding(3) var<storage, read_write> bin : array<BinData> ;
+                @group(0) @binding(5) var<storage, read> quad : array<BHQuad> ;
+                @group(0) @binding(6) var<storage, read_write> atomsIn : array<Atom>;
+                @group(0) @binding(7) var<storage, read_write> atomsOut : array<Atom>;
+
+
+
+                fn part1by1(x: u32) -> u32 {
+                    var v = x & 0x0000ffffu;             
+                    v = (v | (v << 8u)) & 0x00ff00ffu;   
+                    v = (v | (v << 4u)) & 0x0f0f0f0fu;
+                    v = (v | (v << 2u)) & 0x33333333u;
+                    v = (v | (v << 1u)) & 0x55555555u;
+                    return v;
+                }
+
+                fn compact1by1(x: u32) -> u32 {
+                    var v = x & 0x55555555u;
+                    v = (v | (v >> 1u)) & 0x33333333u;
+                    v = (v | (v >> 2u)) & 0x0f0f0f0fu;
+                    v = (v | (v >> 4u)) & 0x00ff00ffu;  
+                    v = (v | (v >> 8u)) & 0x0000ffffu;
+                    return v;
+                }
+
+                fn hash(state: ptr<function, u32>) -> f32 {
+                    var x = *state;
+                    // MurmurHash3 integer finalizer (avalanche function)
+                    x = x ^ (x >> 16u);
+                    x = x * 0x7feb352du;
+                    x = x ^ (x >> 15u);
+                    x = x * 0x846ca68bu;
+                    x = x ^ (x >> 16u);
+                    
+                    // Update the state so the next call produces a new random number
+                    *state = x;
+                    
+                    // Normalize the 32-bit integer to a float between 0.0 and 1.0
+                    return f32(x) / 4294967295.0; 
+                }
+
+                fn atomicAddFloat(ptr: ptr<storage, atomic<u32>, read_write>, value: f32) {
+                    var old_u32: u32 = atomicLoad(ptr);
+                    loop {
+                        let old_f32: f32 = bitcast<f32>(old_u32);
+                        let new_f32: f32 = old_f32 + value;
+                        let new_u32: u32 = bitcast<u32>(new_f32);
+                        
+                        let result = atomicCompareExchangeWeak(ptr, old_u32, new_u32);
+                        if (result.exchanged) {
+                            break;
+                        }
+                        old_u32 = result.old_value;
+                    }
+                }
+
+                fn posToMorton(pos: vec2f) -> u32 {
+
+                    let simMin = -globals.simHalf;
+                    let simSize = globals.simSize;
+
+                    let norm = (pos - simMin) / simSize;
+
+                    let x = u32(clamp(norm.x * f32(globals.gridRes.x), 0.0, f32(globals.gridRes.x-1)));
+                    let y = u32(clamp(norm.y * f32(globals.gridRes.y), 0.0, f32(globals.gridRes.y-1)));
+
+                    let mort = (part1by1(y) << 1u) | part1by1(x);
+
+                    return u32(mort);
+                }
+
+                fn mortonToPos(morton: u32) -> vec2f {
+
+                    let m = u32(morton);
+
+                    let x = compact1by1(m);
+                    let y = compact1by1(m >> 1u);
+
+                    let cell = vec2f(f32(x), f32(y));
+                    let cellSize = globals.simSize / vec2f(f32(globals.gridRes.x), f32(globals.gridRes.y));
+
+                    return (-globals.simHalf) + cell * cellSize + cellSize * 0.5;
+                }
+
+                fn posToAtomID(pos: vec2f) -> u32 {  
+                    let shiftedPos = pos + globals.simHalf;
+
+                    let rawCol = floor(shiftedPos.x / globals.latticeSpacing);
+                    let rawRow = floor(shiftedPos.y / globals.latticeSpacing);
+
+                    let col = u32(clamp(rawCol, 0.0, f32(globals.latticeSize.x - 1u)));
+                    let row = u32(clamp(rawRow, 0.0, f32(globals.latticeSize.y - 1u)));
+
+                    return row * globals.latticeSize.x + col;
+                }
+
+                fn atomIDToPos(id: u32) -> vec2f {
+
+                    let col = id % globals.latticeSize.x;
+                    let row = id / globals.latticeSize.x;
+
+                    let shiftedX = f32(col) * globals.latticeSpacing + (globals.latticeSpacing * 0.5);
+                    let shiftedY = f32(row) * globals.latticeSpacing + (globals.latticeSpacing * 0.5);
+
+                    return vec2f(shiftedX,shiftedY) - globals.simHalf;
+                }
+
+
+                fn calcEField(pos: vec2f, id: u32, electron: bool) -> vec2f {
+                    var Efield = vec2f(0.0, 0.0);
+                    
+                    let theta: f32 = ${THETA}; 
+                    let rootSize: f32 = globals.simSize.x; 
+                    let maxLevel: u32 = globals.treeDepth;
+
+                    // 1. Calculate this particle's Morton ID to track its path down the tree
+                    let myMortID = posToMorton(pos);
+
+                    var bondedMortID: u32 = 0xFFFFFFFFu;
+                    var hasBonded = false;
+                    var bondedIdx = 0xFFFFFFFFu;
+                    if (!electron) {
+                        bondedIdx = atomicLoad(&atomsOut[id].eID);
+                        // Valid indices are less than NUM_OF_ELECTRONS
+                        if (bondedIdx < ${NUM_OF_ELECTRONS}) {
+                            hasBonded = true;
+                            bondedMortID = posToMorton(electronsIn[bondedIdx].pos);
+                        }
+                    }
+
+                    var stack: array<vec2u, 64>; 
+                    var stackPointer: i32 = 0;
+                    
+                    stack[0] = vec2u(0u, 0u);
+
+                    while (stackPointer >= 0) {
+                        let current = stack[stackPointer];
+                        stackPointer--;
+
+                        let nodeID = current.x;
+                        let level = current.y;
+                        let nodeData = quad[nodeID];
+
+                        // Skip completely empty nodes
+                        if (nodeData.posCount == 0u && nodeData.negCount == 0u) {
+                            continue;
+                        }
+
+                        // 2. Check if the evaluating particle is physically INSIDE this node
+                        let levelOffset = ((1u << (2u * level)) - 1u) / 3u;
+                        let particleNodeAtLevel =
+                            levelOffset + (myMortID >> (2u * (maxLevel - level)));
+
+                        var isMyNode = nodeID == particleNodeAtLevel;
+
+                        if (!electron) {
+                            let selfNegMortID = posToMorton(atomsIn[id].negPole);
+                            let selfNegNodeAtLevel =
+                                levelOffset + (selfNegMortID >> (2u * (maxLevel - level)));
+
+                            if (nodeID == selfNegNodeAtLevel) {
+                                isMyNode = true;
+                            }
+                        }
+
+                        if (hasBonded && !isMyNode) {
+                            let bondedNodeAtLevel = levelOffset + (bondedMortID >> (2u * (maxLevel - level)));
+                            if (nodeID == bondedNodeAtLevel) {
+                                isMyNode = true;
+                            }
+                        }
+
+                        var refCenter = nodeData.posCenter;
+                        if (nodeData.posCount == 0u) {
+                            refCenter = nodeData.negCenter;
+                        }
+                        
+                        let refDist = length(pos - refCenter);
+                        let safeDist = max(refDist, 1e-5);
+                        let s = rootSize / f32(1u << level); 
+
+                        let macPassed = (s / safeDist < theta);
+
+                        // 3. Evaluate the node IF it passed the MAC AND it doesn't contain us
+                        if (!isMyNode && macPassed) {
+                            
+                            // --- EVALUATE POSITIVE CLUSTER (Macro Approximation) ---
+                            if (nodeData.posCount > 0u) {
+                                let sep = pos - nodeData.posCenter;
+                                let d = length(sep);
+                                var dir = vec2f(1.0, 0.0);
+                                if (d > 1e-5) { dir = sep / d; }
+                                else {
+                                    let pseudo_rand = fract(sin((f32(id) + pos.x) * 12.9898) * 43758.5453);
+                                    let angle = pseudo_rand * 6.283185307; 
+                                    dir = vec2f(cos(angle), sin(angle));
+                                }
+                                
+                                let safeD = max(d, 1e-5);
+                                let EfieldMag = (${COULOMB_CONST} * nodeData.posCharge) / (safeD * safeD);
+                                Efield += EfieldMag * dir;
+                            }
+
+                            // --- EVALUATE NEGATIVE CLUSTER (Macro Approximation) ---
+                            if (nodeData.negCount > 0u) {
+                                let sep = pos - nodeData.negCenter;
+                                let d = length(sep);
+                                var dir = vec2f(1.0, 0.0);
+                                if (d > 1e-5) { dir = sep / d; }
+                                else {
+                                    let pseudo_rand = fract(sin((f32(id) + pos.x) * 12.9898) * 43758.5453);
+                                    let angle = pseudo_rand * 6.283185307; 
+                                    dir = vec2f(cos(angle), sin(angle));
+                                }
+                                
+                                let safeD = max(d, 1e-5);
+                                let EfieldMag = (${COULOMB_CONST} * nodeData.negCharge) / (safeD * safeD);
+                                Efield += EfieldMag * dir;
+                            }
+
+                        } else if (level < maxLevel) {
+                            // 4. Branch: The node contains us, OR it failed the MAC
+                            let nextLevel = level + 1u;
+                            let childBase = nodeID * 4u + 1u;
+                            
+                            stackPointer++; stack[stackPointer] = vec2u(childBase, nextLevel);
+                            stackPointer++; stack[stackPointer] = vec2u(childBase + 1u, nextLevel);
+                            stackPointer++; stack[stackPointer] = vec2u(childBase + 2u, nextLevel);
+                            stackPointer++; stack[stackPointer] = vec2u(childBase + 3u, nextLevel);
+                        } else {
+                            // 5. WE HIT MAX LEVEL (Leaf Node)
+                            // Ditch the quadtree aggregates. Do exact particle-to-particle interactions.
+                            
+                            let leafOffset = ((1u << (2u * maxLevel)) - 1u) / 3u;
+                            let leafMortID = nodeID - leafOffset;
+
+                            // -- Exact Atoms in this cell --
+                            let leafCenter = mortonToPos(leafMortID);
+                            let atomID = posToAtomID(leafCenter);
+                            if(electron || atomID != id){
+                                if (atomID < globals.atomCount) {
+                                    let atomPos = atomsIn[atomID].pos;
+                                    let atomNegPos = atomsIn[atomID].negPole;
+                                    let coreChar = atomsIn[atomID].coreCharge;
+                                    let shellChar = atomsIn[atomID].shellCharge;
+                                    if (posToMorton(atomPos) == leafMortID) {
+                                        let sep = pos - atomPos;
+                                        let d = length(sep);
+                                        var dir = vec2f(1.0, 0.0);
+                                        if (d > 1e-9) { dir = sep / d; }
+                                        else {
+                                            let pseudo_rand = fract(sin((f32(id) + pos.x) * 12.9898) * 43758.5453);
+                                            let angle = pseudo_rand * 6.283185307;
+                                            dir = vec2f(cos(angle), sin(angle));
+                                        }
+                                        let safeD = max(d, 1e-5);
+                                        let EfieldMag = (${COULOMB_CONST} * coreChar) / (safeD * safeD);
+                                        Efield += EfieldMag * dir;
+                                    }
+
+                                    if (posToMorton(atomNegPos) == leafMortID) {
+                                        let sep = pos - atomNegPos;
+                                        let d = length(sep);
+                                        var dir = vec2f(1.0, 0.0);
+                                        if (d > 1e-9) { dir = sep / d; }
+                                        else {
+                                            let pseudo_rand = fract(sin((f32(id) + pos.x) * 12.9898) * 43758.5453);
+                                            let angle = pseudo_rand * 6.283185307;
+                                            dir = vec2f(cos(angle), sin(angle));
+                                        }
+                                        let safeD = max(d, 1e-5);
+                                        let EfieldMag = (${COULOMB_CONST} * shellChar) / (safeD * safeD);
+                                        Efield += EfieldMag * dir;
+                                    }
+                                }
+                            }
+
+                            // -- Exact Electrons in this cell --
+                            // Grab the sorted boundary indices for this exact leaf cell
+                            let start = bin[leafMortID].start;
+                            let end = select(bin[leafMortID + 1u].start, arrayLength(&electronsIn), leafMortID == arrayLength(&bin) - 1u);
+                            
+                            for (var j: u32 = start; j < end; j = j + 1u) {
+                                if( electron && (j == id) ){
+                                    continue; // Skip self safely!
+                                }
+                                if( !electron ){
+                                    if (hasBonded && bondedIdx == j){
+                                        continue;
+                                    }
+                                }
+                                
+                                
+                                let sep = pos - electronsIn[j].pos;
+                                let dist = length(sep);
+                                var dir = vec2f(1.0, 0.0);
+
+
+                                if (dist > 1e-5) { 
+                                    dir = sep / dist; 
+                                }else {
+                                    let pseudo_rand = fract(sin((f32(id) + pos.x) * 12.9898) * 43758.5453);
+                                    let angle = pseudo_rand * 6.283185307;
+                                    dir = vec2f(cos(angle), sin(angle));
+                                }
+                                
+                                let safeD = max(dist, 1e-5);
+                                let EfieldMag = (${COULOMB_CONST} * globals.eCharge) / (safeD * safeD);
+                                Efield += EfieldMag * dir;
+                            }
+                        }
+                    }
+
+                    return Efield;
+                }
+
+
+                fn wallCollison(incoming_electron: Electron) -> Electron{
+                
+                    var electron = incoming_electron;
+                    let radius_offset = globals.eRadius + 0.0001;
+
+                    let right_bound = globals.simHalf.x - radius_offset;
+                    let left_bound = -globals.simHalf.x + radius_offset;
+                    let top_bound = globals.simHalf.y - radius_offset;
+                    let bottom_bound = -globals.simHalf.y + radius_offset;
+
+                    if (electron.pos.x > right_bound) {
+                        let overshoot = electron.pos.x - right_bound;
+                        electron.pos.x = right_bound - overshoot; 
+                        electron.vel.x = -abs(electron.vel.x) * ${WALL_DAMPING};
+                    } 
+                    else if (electron.pos.x < left_bound) {
+                        let overshoot = left_bound - electron.pos.x;
+                        electron.pos.x = left_bound + overshoot;
+                        electron.vel.x = abs(electron.vel.x) * ${WALL_DAMPING};
+                    }
+/*  
+                    if (electron.pos.x + globals.eRadius + 0.00> globals.simHalf.x) {
+                        electron.pos.x = - electron.pos.x;
+                    } 
+                    else if (electron.pos.x - globals.eRadius - 0.00 < -globals.simHalf.x) {
+                        electron.pos.x = - electron.pos.x;
+                    }
+*/
+                    if (electron.pos.y > top_bound) {
+                        let overshoot = electron.pos.y - top_bound;
+                        electron.pos.y = top_bound - overshoot;
+                        electron.vel.y = -abs(electron.vel.y) * ${WALL_DAMPING};
+                    } 
+                    else if (electron.pos.y < bottom_bound) {
+                        let overshoot = bottom_bound - electron.pos.y;
+                        electron.pos.y = bottom_bound + overshoot;
+                        electron.vel.y = abs(electron.vel.y) * ${WALL_DAMPING};
+                    }
+                    
+                    let margin = globals.eRadius + 0.0001;
+                    let minPos = -globals.simHalf + vec2f(margin, margin);
+                    let maxPos =  globals.simHalf - vec2f(margin, margin);
+
+                    electron.pos = clamp(electron.pos, minPos, maxPos);
+
+                    return electron;
+                
+                }
+                
+                fn wallLoop(incoming_electron: Electron) -> Electron{
+                
+                    var electron = incoming_electron;
+
+                    if (electron.pos.x + globals.eRadius + 0.00> globals.simHalf.x) {
+                        electron.pos.x = - electron.pos.x;
+                    } 
+                    else if (electron.pos.x - globals.eRadius - 0.00 < -globals.simHalf.x) {
+                        electron.pos.x = - electron.pos.x;
+                    }
+
+                    if (electron.pos.y + globals.eRadius + 0.00 > globals.simHalf.y) {
+                        electron.pos.y = - electron.pos.y;
+                    } 
+                    else if (electron.pos.y - globals.eRadius - 0.00 < -globals.simHalf.y) {
+                        electron.pos.y = - electron.pos.y;
+                    }
+
+                    return electron;
+                
+                }
+
+                fn wallCenter(incoming_electron: Electron) -> Electron{
+                
+                    var electron = incoming_electron;
+
+                    if (electron.pos.x + globals.eRadius + 0.00> globals.simHalf.x) {
+                        electron.pos = vec2f(0.0,0.0);
+                    } 
+                    else if (electron.pos.x - globals.eRadius - 0.00 < -globals.simHalf.x) {
+                        electron.pos = vec2f(0.0,0.0);
+                    }
+
+                    if (electron.pos.y + globals.eRadius + 0.00 > globals.simHalf.y) {
+                        electron.pos = vec2f(0.0,0.0);
+                    } 
+                    else if (electron.pos.y - globals.eRadius - 0.00 < -globals.simHalf.y) {
+                        electron.pos = vec2f(0.0,0.0);
+                    }
+
+                    return electron;
+                
+                }
+
+                
+
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn firstDynamic(@builtin(global_invocation_id) id: vec3u) {
+
+//safety check ignore
+                    let i = id.x; 
+                    if (i >= arrayLength(&electronsIn)) { return; } 
+//safety check ignore
+
+                    var electron = electronsIn[i];
+
+                    if ( electron.atomID >= ${NUM_OF_ATOMS}){
+                    
+                        let vxB = vec2f(electron.vel.y * ${magneticField} , -electron.vel.x * ${magneticField});
+                        var force = globals.eCharge * ((calcEField(electron.pos,i,true) + vec2f(${externalEField},0.0)) + vxB);
+
+
+                        let accelertation = ( force / globals.eMass ) ;
+                        electron.vel = electron.vel + accelertation * globals.deltaTime;
+                        let speed = length(electron.vel);
+
+                        if((speed) > ${MAX_SPEED}){
+                            electron.vel = ${MAX_SPEED} * electron.vel/speed ;
+                        }
+
+                        electron.pos = electron.pos + electron.vel * globals.deltaTime;
+
+                        electron = wallCollison(electron); 
+                        //electron = wallLoop(electron); 
+                        //electron = wallCenter(electron); 
+
+
+                    }else{
+                        electron.pos = atomsIn[electron.atomID].negPole ;
+                        
+                        atomicStore(&atomsOut[electron.atomID].eID, i);
+                    }
+
+                    electron.mortID = posToMorton(electron.pos);
+
+                    electronsOut[i] = electron;
+                    
+                }
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn updateAtoms(@builtin(global_invocation_id) id: vec3u) {
+                    
+//safety check ignore
+                    let i = id.x; 
+                    if (i >= globals.atomCount) { return; } 
+//safety check ignore
+
+                    let atomIn = &atomsIn[i];
+
+                    var current_pos = atomIn.pos;
+                    var current_vel = vec2f(bitcast<f32>(atomicLoad(&atomIn.velXu)),bitcast<f32>(atomicLoad(&atomIn.velYu)));
+                    var current_temp = atomIn.temp;
+
+                    var force = vec2f(0.0,0.0);
+
+                    let col = i % globals.latticeSize.x;
+                    let row = i / globals.latticeSize.x;
+
+                    // --- PHYSICS MATH (Barely Changed) ---
+
+                    if (row < globals.latticeSize.y - 1u){
+                        // FIXED: Grab just the pos!
+                        let atomUp_pos = atomsIn[i + globals.latticeSize.x].pos; 
+                        let sep = current_pos - atomUp_pos;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing)) > 1e-5 ) {
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst} * (dist - globals.latticeSpacing);
+                            force += forceMagnitude * dir;
+                        }
+                    } else { 
+                        let anchor = atomIn.initPos; // Read from pointer
+                        let sep = current_pos - anchor;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing)) > 1e-5 ){
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst* 1.0} * dist;
+                            force += forceMagnitude * dir;
+                        }
+                    }
+
+                    if (col < globals.latticeSize.x - 1u){
+                        let atomRight_pos = atomsIn[i + 1u].pos;
+                        let sep = current_pos - atomRight_pos;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing)) > 1e-5 ) {
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst} * (dist - globals.latticeSpacing);
+                            force += forceMagnitude * dir;
+                        }
+                    } else { 
+                        let anchor = atomIn.initPos;
+                        let sep = current_pos - anchor;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing)) > 1e-5 ){
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst* 1.0} * dist;
+                            force += forceMagnitude * dir;
+                        }
+                    }
+
+                    if (row > 0u){
+                        let atomDown_pos = atomsIn[i - globals.latticeSize.x].pos;
+                        let sep = current_pos - atomDown_pos;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing)) > 1e-5 ) {
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst} * (dist - globals.latticeSpacing);
+                            force += forceMagnitude * dir;
+                        }
+                    } else { 
+                        let anchor = atomIn.initPos;
+                        let sep = current_pos - anchor;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing)) > 1e-5 ){
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst * 1.0} * dist;
+                            force += forceMagnitude * dir;
+                        }
+                    }
+
+                    if (col > 0u){
+                        let atomLeft_pos = atomsIn[i - 1u].pos;
+                        let sep = current_pos - atomLeft_pos;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing)) > 1e-5 ) {
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst} * (dist - globals.latticeSpacing);
+                            force += forceMagnitude * dir;
+                        }
+                    } else { 
+                        let anchor = atomIn.initPos;
+                        let sep = current_pos - anchor;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing)) > 1e-5 ){
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst* 1.0} * dist;
+                            force += forceMagnitude * dir;
+                        }
+                    }
+
+                    // Diagonals
+                    if (row < globals.latticeSize.y - 1u && col < globals.latticeSize.x - 1u){
+                        let atomDiagonal_pos = atomsIn[i + globals.latticeSize.x + 1u].pos;
+                        let sep = current_pos - atomDiagonal_pos;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing * 1.41421356)) > 1e-5 ) {
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst} * (dist - (globals.latticeSpacing * 1.41421356));
+                            force += forceMagnitude * dir;
+                        }
+                    }
+
+                    if (row < globals.latticeSize.y - 1u && col > 0u){
+                        let atomDiagonal_pos = atomsIn[(i + globals.latticeSize.x) - 1u].pos;
+                        let sep = current_pos - atomDiagonal_pos;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing * 1.41421356)) > 1e-5 ) {
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst} * (dist - (globals.latticeSpacing * 1.41421356));
+                            force += forceMagnitude * dir;
+                        }
+                    }
+
+                    if (row > 0u && col < globals.latticeSize.x - 1u){
+                        let atomDiagonal_pos = atomsIn[i - globals.latticeSize.x + 1u].pos;
+                        let sep = current_pos - atomDiagonal_pos;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing * 1.41421356)) > 1e-5 ) {
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst} * (dist - (globals.latticeSpacing * 1.41421356));
+                            force += forceMagnitude * dir;
+                        }
+                    }
+
+                    if (row > 0u && col > 0u){
+                        let atomDiagonal_pos = atomsIn[i - globals.latticeSize.x - 1u].pos;
+                        let sep = current_pos - atomDiagonal_pos;
+                        let dist = length(sep);
+                        if (dist != 0.0 && abs(dist - (globals.latticeSpacing * 1.41421356)) > 1e-5 ) {
+                            let dir = sep / dist;
+                            let forceMagnitude = ${springConst} * (dist - (globals.latticeSpacing * 1.41421356));
+                            force += forceMagnitude * dir;
+                        }
+                    }
+
+                    var atomEID = atomicLoad(&atomIn.eID);
+                    var eCharge = 0.0;
+                    if(atomEID < ${NUM_OF_ELECTRONS}){
+                        eCharge = globals.eCharge;
+                    }
+
+                    let EField = calcEField(current_pos,i,false) + vec2f(${externalEField},0.0);
+                    force += (atomIn.coreCharge + atomIn.shellCharge + eCharge) * EField;
+                    let acceleration = ( force / atomIn.mass ) + vec2f(0.0,0.0);
+                    current_vel = (current_vel + acceleration * globals.deltaTime ) * 1.0;
+                    let current_spe = length(current_vel);
+
+                    if(current_spe > ${ATOM_MAX_SPEED}){
+                        current_vel = current_vel / current_spe * ${ATOM_MAX_SPEED};
+                    }
+
+                    current_pos = current_pos + current_vel * globals.deltaTime;
+                    let vibSep = current_pos - atomIn.initPos;
+                    let vibLen = length(vibSep);
+
+                    if (vibLen > atomIn.atomicRadius && vibLen > 1e-8) {
+                    current_pos = atomIn.initPos + vibSep / vibLen * atomIn.atomicRadius;
+                    }
+
+                    var rawDipoleSep = -(atomIn.polarizability * EField) / atomIn.coreCharge;
+                    var rawDipoleLen = length(rawDipoleSep);
+                    var clampDipoleSep = rawDipoleSep;
+                    var clampDipoleLen = length(clampDipoleSep);
+                    let maxDipoleLen = atomIn.atomicRadius * 1.0;
+
+                    if (clampDipoleLen > maxDipoleLen){
+                        clampDipoleSep =  clampDipoleSep / clampDipoleLen * maxDipoleLen;
+                    }
+
+                    let clampNegPos =  current_pos + clampDipoleSep;
+
+                    var negPos = mix(atomIn.negPole , clampNegPos, 0.05);
+                    var negSep = negPos - current_pos;
+                    var negLen = length(negSep);
+
+                    if (negLen > maxDipoleLen){
+                        negPos = current_pos +  negSep / negLen * maxDipoleLen ;
+                        negSep = negPos - current_pos;
+                        negLen = length(negSep);
+                    }
+
+                    if (negLen < .01) {
+                        negSep = vec2f(0.0, 0.0);
+                        negPos = current_pos;
+                        negLen = 0.0;
+                    }
+
+                    
+
+                    let speedSq = dot(current_vel, current_vel);
+                    let instantKE = ${KINETIC_CONST} * atomIn.mass * speedSq;
+                    let instantTemp = instantKE / ${BOLTZMANN_CONST};
+                    current_temp = mix(atomIn.temp, instantTemp, 0.02);
+
+                    
+
+                    if ( atomEID < ${NUM_OF_ELECTRONS}){
+
+                        let safeDipoleLen = max(negLen, 1e-5);
+                        let storedSpringEnergy = 0.5 * atomIn.polarizability * (safeDipoleLen * safeDipoleLen);
+                        let electronEnergy = (.5 * globals.eMass * speedSq) + storedSpringEnergy;
+
+                        var excessEnergies: array<f32, 9>;
+                        var jumpableGaps = 0u;
+                        var rngState = bitcast<u32>(globals.seed) ^ i;
+                        let jumpProbability = hash(&rngState);
+
+                        if(jumpProbability < .01){
+                        
+                            for(var r: i32 = i32(row) - 1; r <= i32(row) + 1; r += 1) {
+                                for(var c: i32 = i32(col) - 1 ; c <= i32(col) + 1; c += 1) {
+                                    
+                                    let localIdx = (r - i32(row) + 1) * 3 + (c - i32(col) + 1); // 0 to 8 mapping
+                                    
+                                    if (r >= 0 && r < i32(globals.latticeSize.y) && c >= 0 && c < i32(globals.latticeSize.x)) {
+                                        
+                                        let latticeID = u32(r) * globals.latticeSize.x + u32(c);
+                                        
+                                        if (localIdx == 4) {
+                                            
+                                            let ionizationGap = atomIn.bindEnergy;
+                                            let excessEnergy = electronEnergy - ionizationGap;
+                                            
+                                            excessEnergies[localIdx] = excessEnergy;
+                                            
+                                            if(excessEnergy >= 0.0){
+                                                jumpableGaps += 1u;
+                                            }
+
+                                        } else {
+
+                                            if (atomicLoad(&atomsIn[latticeID].eID) >= ${NUM_OF_ELECTRONS}) {
+                                                
+                                                let neighbor_pos = atomsIn[latticeID].pos;
+                                                let displacement = neighbor_pos - current_pos; 
+                                                
+                                                let workDoneByField = dot(globals.eCharge * EField, displacement) * 1.0;
+                                                
+                                                let energyGap = atomIn.bindEnergy - atomsIn[latticeID].bindEnergy - workDoneByField;
+                                                let excessEnergy = electronEnergy - energyGap;
+                                                
+                                                excessEnergies[localIdx] = excessEnergy;
+                                                
+                                                if(excessEnergy >= 0.0){
+                                                    jumpableGaps += 1u;
+                                                }
+                                            } else {
+                                                excessEnergies[localIdx] = -3e30; 
+                                            }
+                                        }
+                                    } else {
+                                        excessEnergies[localIdx] = -3e30;
+                                    }
+                                }
+                            }
+
+                            if (jumpableGaps > 0u){
+                                
+                                let randFloat1 = hash(&rngState); 
+                                
+                                let gapToJump = u32(randFloat1 * f32(jumpableGaps));
+                                var thisGap = 0u;
+
+                                for(var a: u32 = 0u; a < 9u ; a += 1u) {
+                                    if(excessEnergies[a] >= 0.0) {
+                                        
+                                        if (thisGap == gapToJump) {
+                                            if (a == 4u) {
+                                                let randFloat2 = hash(&rngState);
+                                                let randFloat3 = hash(&rngState);
+                                                var velDir = vec2f(cos(randFloat2 * 6.283185), sin(randFloat2 * 6.283185));
+                                                var posDir = vec2f(cos(randFloat3 * 6.283185), sin(randFloat3 * 6.283185));
+
+                                                if (speedSq > 1e-5) { velDir = normalize(current_vel); }
+                                                if (safeDipoleLen > 1e-5) { posDir = normalize(negSep); }
+
+                                                let escapeDist = (atomIn.atomicRadius + globals.eRadius);
+                                            
+                                                var electron = electronsOut[atomEID];
+                                                electron.vel = velDir * sqrt((2.0 * excessEnergies[a]) / globals.eMass);
+                                                electron.pos = current_pos + posDir * escapeDist;
+                                                electron.mortID = posToMorton(electron.pos);
+                                                electron.atomID = ${NUM_OF_ATOMS + 1}; // Free electron flag
+                                                electron.pad2 = 1.0;
+                                                electronsOut[atomEID] = electron;
+
+                                                atomicStore(&atomsOut[i].eID, ${NUM_OF_ELECTRONS + 1});
+                                                atomEID = ${NUM_OF_ELECTRONS + 1};
+                                                
+                                            } else {
+                                                
+                                                let target_r = i32(row) + (i32(a) / 3) - 1;
+                                                let target_c = i32(col) + (i32(a) % 3) - 1;
+                                                let targetLatticeID = u32(target_r) * globals.latticeSize.x + u32(target_c);
+
+                                                let jumpAttempt = atomicCompareExchangeWeak(&atomsOut[targetLatticeID].eID, ${NUM_OF_ELECTRONS + 1}, atomEID);
+                                                
+                                                if (jumpAttempt.exchanged) {
+                                                    
+                                                    atomicStore(&atomsOut[i].eID, ${NUM_OF_ELECTRONS + 1});
+                                                    
+                                                    electronsOut[atomEID].atomID = targetLatticeID;
+                                                    
+                                                    let lostVel = sqrt((2.0 * excessEnergies[a]) / atomIn.mass);
+                                                    if (speedSq > 1e-12) {
+                                                        current_vel -= lostVel * normalize(current_vel) * 0.0;
+                                                    }
+                                                    atomEID = ${NUM_OF_ELECTRONS + 1};
+                                                }
+                                            }
+                                            break;
+                                        }
+                                        thisGap += 1u;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let atomOut = &atomsOut[i];
+
+                    atomOut.pos = current_pos;
+                    atomOut.temp = current_temp;
+                    atomOut.initPos = atomIn.initPos;
+                    atomOut.mass = atomIn.mass;
+                    atomOut.coreCharge = atomIn.coreCharge;
+                    atomOut.kinE = atomIn.kinE; 
+                    atomOut.potE = atomIn.potE;
+                    atomOut.scatRadius = atomIn.scatRadius;
+
+                    atomOut.negPole = negPos;
+                    
+
+                    atomicStore(&atomOut.eID, atomEID);
+
+                    if (atomEID < ${NUM_OF_ELECTRONS}){
+                    
+                        electronsOut[atomEID].pos = negPos;
+                        electronsOut[atomEID].vel = vec2f(0.0,0.0);
+                        electronsOut[atomEID].mortID = posToMorton(negPos);
+
+                    }
+
+                    atomicStore(&atomOut.velXu,bitcast<u32>(current_vel.x));
+                    atomicStore(&atomOut.velYu,bitcast<u32>(current_vel.y));
+
+                }
+                
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn collision(@builtin(global_invocation_id) id: vec3u) {
+
+//safety check ignore
+                    let i = id.x; 
+                    if (i >= arrayLength(&electronsIn)) { return; } 
+//safety check ignore
+
+                    var newElectron = electronsOut[i];
+
+                    if (newElectron.atomID < ${NUM_OF_ATOMS}) {
+                        return;
+                    }
+
+                    var oldElectron = electronsIn[i];
+
+                    if (length(newElectron.pos - oldElectron.pos) > globals.simHalf.x) {
+                        let margin = globals.eRadius + 0.0001;
+                        let minPos = -globals.simHalf + vec2f(margin, margin);
+                        let maxPos =  globals.simHalf - vec2f(margin, margin);
+
+                        electronsOut[i].pos = clamp(oldElectron.pos, minPos, maxPos);
+                        electronsOut[i].vel = vec2f(0.0, 0.0);
+                        electronsOut[i].mortID = posToMorton(electronsOut[i].pos);
+                        return;
+                    }
+
+                    let centralAtomID = posToAtomID(newElectron.pos);
+                    
+                    if (centralAtomID < globals.atomCount) {
+
+                        let centerCol = centralAtomID % globals.latticeSize.x;
+                        let centerRow = centralAtomID / globals.latticeSize.x;
+
+                        for(var r: i32 = -3; r <= 3; r += 1) {
+                            for(var c: i32 = -3 ; c <= 3; c += 1) {
+
+                                let checkCol = i32(centerCol) + c;
+                                let checkRow = i32(centerRow) + r;
+
+                                if (checkCol >= 0 && checkCol < i32(globals.latticeSize.x) && checkRow >= 0 && checkRow < i32(globals.latticeSize.y)) {
+                            
+                                    let atomID = u32(checkRow) * globals.latticeSize.x + u32(checkCol);
+
+                                    let newAtom = &atomsOut[atomID];
+                                    let oldAtom = &atomsIn[atomID];
+
+
+                                    let totalMass = newAtom.mass + globals.eMass;
+                                    let atomMassRatio = (2.0 * globals.eMass) / totalMass;
+                                    let elMassRatio = (2.0 * newAtom.mass) / totalMass;
+
+                                    let dP = oldElectron.pos - oldAtom.pos;
+
+                                    let VA = newElectron.pos - oldElectron.pos;
+                                    let VB = newAtom.pos - oldAtom.pos;
+                                    let dV = VA - VB;
+
+                                    var atomVel = vec2f(bitcast<f32>(atomicLoad(&newAtom.velXu)),bitcast<f32>(atomicLoad(&newAtom.velYu)));
+
+                                    let relVel = oldElectron.vel - atomVel;
+
+                                    let r_total = globals.eRadius + newAtom.scatRadius;
+
+                                    let a = dot(dV, dV);
+                                    let b_quad = 2.0 * dot(dP, dV);
+                                    let c_quad = dot(dP, dP) - (r_total * r_total);
+
+                                    if (c_quad <= 0.0) {
+
+                                        var absorbed = false;
+
+                                        if ( (.5 * globals.eMass * dot(oldElectron.vel,oldElectron.vel)) < newAtom.bindEnergy){
+                                            let absorbed2  = atomicCompareExchangeWeak(&atomsOut[atomID].eID, ${NUM_OF_ELECTRONS} + 1u, i);
+                                            absorbed = absorbed2.exchanged;
+                                        }
+
+                                        if (absorbed){
+                                            electronsOut[i].atomID = atomID;
+                                            electronsOut[i].pos = newAtom.negPole;
+                                            electronsOut[i].vel = vec2f(0.0, 0.0);
+                                            electronsOut[i].mortID = posToMorton(newAtom.negPole);
+                                            electronsOut[i].pad2 = 0.0;
+                                        }else{
+                                            let dist_squared = dot(dP, dP);
+                                            let safe_dist = max(dist_squared, 0.000000001); 
+
+                                            let dist = sqrt(safe_dist);
+                                            let overlap = r_total - dist;
+                                            electronsOut[i].pos = electronsOut[i].pos + (dP / dist) * overlap * 1;
+
+                                            if (dot(relVel, dP) < 0.0) {
+                                                electronsOut[i].vel += - elMassRatio * (dot(relVel, dP) / safe_dist) * dP * 0.9;
+                                                let atomImpactVel = atomMassRatio * (dot(relVel, dP) / safe_dist) * dP * 1.0;
+                                                atomicAddFloat(&newAtom.velXu,atomImpactVel.x);
+                                                atomicAddFloat(&newAtom.velYu,atomImpactVel.y);
+
+                                            }
+                                        } 
+                                        break;
+                                    }else if (a > 0.00000000001) {
+
+                                        let discriminant = (b_quad * b_quad) - (4.0 * a * c_quad);
+                                        
+                                        
+                                        if (discriminant >= 0.0) {
+                                            
+                                            let t = (-b_quad - sqrt(discriminant)) / (2.0 * a);
+                                            
+                                            if (t >= 0.0 && t <= 1.0) {
+                                                let x1 = oldElectron.pos + (VA * t);
+                                                let x2 = oldAtom.pos + (VB * t);
+                                                let x_diff = x1 - x2;
+                                                if (dot(relVel, x_diff) < 0.0) {
+                                                    
+                                                    var absorbed = false;
+
+                                                    if ( (.5 * globals.eMass * dot(oldElectron.vel,oldElectron.vel)) < newAtom.bindEnergy){
+                                                        let absorbed2  = atomicCompareExchangeWeak(&atomsOut[atomID].eID, ${NUM_OF_ELECTRONS} + 1u, i);
+                                                        absorbed = absorbed2.exchanged;
+                                                    }
+                                                    
+                                                    if (absorbed){
+
+                                                        electronsOut[i].atomID = atomID;
+                                                        electronsOut[i].pos = newAtom.negPole;
+                                                        electronsOut[i].vel = vec2f(0.0, 0.0);
+                                                        electronsOut[i].mortID = posToMorton(newAtom.negPole);
+                                                        electronsOut[i].pad2 = 0.0;
+
+                                                    }else{
+
+                                                        let dist_squared = dot(x_diff, x_diff);
+                                                        let safe_dist = max(dist_squared, 0.0000001); 
+
+                                                        let dist = sqrt(safe_dist);
+                                                        let overlap = r_total - dist;
+                                                        electronsOut[i].pos = electronsOut[i].pos + (x_diff / dist) * overlap * 1;
+
+                                                        electronsOut[i].vel = electronsOut[i].vel - elMassRatio * (dot(relVel, x_diff) / safe_dist) * x_diff * 0.9;
+                                                        let atomImpactVel = atomMassRatio * (dot(relVel, x_diff) / safe_dist) * x_diff * 1.0;
+                                                        atomicAddFloat(&newAtom.velXu,atomImpactVel.x);
+                                                        atomicAddFloat(&newAtom.velYu,atomImpactVel.y);
+                                                    }  
+                                                    break;  
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn binElectrons(@builtin(global_invocation_id) id: vec3u) {
+
+//safety check ignore
+                    let i = id.x; 
+                    if (i >= arrayLength(&electronsOut)) { return; } 
+//safety check ignore
+
+                    electronsOut[i].localID = atomicAdd(&bin[electronsOut[i].mortID].size, 1u); 
+
+                }
+            `
+        });
+
+    /*SORT SHADER
+    
+    */
+
+        const SortShaderModule = device.createShaderModule({
+            label: "Compute shader",
+            code: `
+                enable subgroups;
+            
+                struct Globals {
+                    deltaTime: f32,
+                    seed: f32,
+                    pixelSize: f32,
+                    cellSize: f32,
+                    simSize: vec2f,
+                    simHalf: vec2f,
+                    gridRes: vec2u,
+                    eMass: f32,
+                    eCharge: f32,
+                    eRadius: f32,
+                    eVisRadius: f32,
+                    treeDepth: u32,
+                    currentLevel: u32,
+                    levelOffset: u32,
+                    childOffset: u32,
+                    nodesThisLevel: u32,
+                    leafOffset: u32,
+                    draw_grid_depth: u32,
+                    draw_grid_start: u32,
+                    EMPTY2: u32,
+                    atomCount: u32,
+                    atomVisRadius: f32,
+                    latticeSpacing: f32,
+                    latticeSize: vec2u,
+                };
+
+                struct Electron {
+                    pos: vec2f,
+                    vel: vec2f,
+                    mortID: u32,
+                    localID: u32,
+                    atomID: u32,
+                    Efield: f32,
+                };
+
+                struct Atom {
+                    initPos: vec2f,
+                    pos: vec2f,
+                    velXu: u32,
+                    velYu: u32,
+                    negPole: vec2f,
+                    eID: u32,
+                    coreCharge: f32,
+                    shellCharge: f32,
+                    atomicRadius: f32,
+                    scatRadius: f32,
+                    mass: f32,
+                    bindEnergy: f32,
+                    polarizability: f32,
+                    kinE: f32,
+                    potE: f32,
+                    temp: f32,
+                    pad2: f32,
+                };
+
+
+                struct BinData {
+                    size: u32,
+                    start: u32,
+                }
+
+                struct SortData {
+                    moveForward: u32,
+                    moveBack: u32,
+                }
+
+                @group(0) @binding(0) var<uniform> globals : Globals;
+                @group(0) @binding(1) var<storage, read_write> bin : array<BinData> ;
+                @group(0) @binding(2) var<storage, read_write> sort : array<SortData>;
+                @group(0) @binding(3) var<storage, read_write> holder : array<Electron> ;
+                @group(0) @binding(4) var<storage, read_write> electrons : array<Electron> ;
+                @group(0) @binding(5) var<storage, read_write> block_sum : array<u32> ;
+                @group(0) @binding(6) var<storage, read_write> atoms : array<Atom> ;
+
+
+                var<workgroup> local_data: array<u32, 64>;
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn clearBins(@builtin(global_invocation_id) id: vec3u) {
+//safety check ignore
+                    let i = id.x; 
+                    if (i >= arrayLength(&bin)) { return; } 
+//safety check ignore
+                    bin[i].size = 0u;
+                }
+
+//this is not shitty and not a place holder to be replace with a parallel prefix scan because it is a parallel prefix scan
+                @compute @workgroup_size(256)
+                fn pass1_block_scan(
+                    @builtin(local_invocation_id) lid: vec3<u32>,
+                    @builtin(workgroup_id) wid: vec3<u32>,
+                    @builtin(num_workgroups) num_wg: vec3<u32>,
+                    @builtin(subgroup_size) sg_size: u32,
+                    @builtin(subgroup_invocation_id) sg_lane: u32,
+                    @builtin(subgroup_id) sg_id: u32,
+                    @builtin(global_invocation_id) gid: vec3<u32>
+                ) {
+                    let global_idx = gid.x;
+                    let in_range = global_idx < arrayLength(&bin);
+                    
+                    // 1. Get the bin size (or 0 if we are out of bounds)
+                    var v = 0u;
+                    if (in_range) {
+                        v = bin[global_idx].size;
+                    }
+
+                    // 2. Hardware magic
+                    let sg_prefix = subgroupExclusiveAdd(v); // My running total at my table
+                    let sg_sum = subgroupAdd(v);             // Total of my table
+
+                    // 3. Table captain writes to chalkboard
+                    if (sg_lane == 0u) {
+                        local_data[sg_id] = sg_sum;
+                    }
+                    workgroupBarrier();
+
+                    // 4. Thread 0 scans the chalkboard
+                    let num_sg = (256u + sg_size - 1u) / sg_size; // How many tables are there?
+                    if (lid.x == 0u) {
+                        var sg_sum_total = 0u;
+                        for (var i = 0u; i < num_sg; i = i + 1u) {
+                            let tmp = local_data[i];
+                            local_data[i] = sg_sum_total;
+                            sg_sum_total = sg_sum_total + tmp;
+                        }
+                        
+                        // Write the total of THIS ENTIRE WORKGROUP to the block_sum array
+                        let wg_linear = wid.x; 
+                        if (wg_linear < arrayLength(&block_sum)) {
+                            block_sum[wg_linear] = sg_sum_total;
+                        }
+                    }
+                    workgroupBarrier();
+
+                    // 5. Save the local scan result to bin.start
+                    if (in_range) {
+                        bin[global_idx].start = local_data[sg_id] + sg_prefix;
+                    }
+                }
+
+                @compute @workgroup_size(1)
+                fn pass2_scan_blocks() {
+                    var running_sum = 0u;
+                    for (var i = 0u; i < arrayLength(&block_sum); i++) {
+                        let tmp = block_sum[i];
+                        block_sum[i] = running_sum;
+                        running_sum += tmp;
+                    }
+                }
+
+                @compute @workgroup_size(256)
+                fn pass3_add_blocks(@builtin(global_invocation_id) gid: vec3u, @builtin(workgroup_id) wid: vec3u) {
+                    let global_idx = gid.x;
+                    if (global_idx < arrayLength(&bin)) {
+                        // Add the total sum of all previous blocks
+                        bin[global_idx].start += block_sum[wid.x];
+                    }
+                }
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn createMovementArray(@builtin(global_invocation_id) id: vec3u) {
+                    
+//safety check ignore
+                    let i = id.x; 
+                    if (i >= arrayLength(&sort)) { return; } 
+//safety check ignore
+
+                    let mortID = electrons[i].mortID;
+                    let localID = electrons[i].localID;
+                    let newLoc = bin[mortID].start + localID;
+
+                    sort[i].moveForward = newLoc;
+                    sort[newLoc].moveBack = i;
+
+                    holder[newLoc] = electrons[i];
+
+                }
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn swap(@builtin(global_invocation_id) id: vec3u) {
+                    
+//safety check ignore
+                    let i = id.x; 
+                    if (i >= arrayLength(&sort)) { return; } 
+//safety check ignore
+
+                    electrons[i] = holder[i];
+                    if (electrons[i].atomID < ${NUM_OF_ATOMS}){
+                        atoms[electrons[i].atomID].eID = i;
+
+                    }
+                }
+            `
+        });
+    /*BARNES-HUT QUAD
+
+    */
+
+        const BHQuadShaderModule = device.createShaderModule({
+            label: "Compute shader",
+            code: `
+            
+                struct Globals {
+                    deltaTime: f32,
+                    seed: f32,
+                    pixelSize: f32,
+                    cellSize: f32,
+                    simSize: vec2f,
+                    simHalf: vec2f,
+                    gridRes: vec2u,
+                    eMass: f32,
+                    eCharge: f32,
+                    eRadius: f32,
+                    eVisRadius: f32,
+                    treeDepth: u32,
+                    currentLevel: u32,
+                    levelOffset: u32,
+                    childOffset: u32,
+                    nodesThisLevel: u32,
+                    leafOffset: u32,
+                    draw_grid_depth: u32,
+                    draw_grid_start: u32,
+                    EMPTY2: u32,
+                    atomCount: u32,
+                    atomVisRadius: f32,
+                    latticeSpacing: f32,
+                    latticeSize: vec2u,
+                };
+
+                struct Electron {
+                    pos: vec2f,
+                    vel: vec2f,
+                    mortID: u32,
+                    localID: u32,
+                    atomID: u32,
+                    pad2: f32,
+                };
+
+                struct Atom {
+                    initPos: vec2f,
+                    pos: vec2f,
+                    velXu: u32,
+                    velYu: u32,
+                    negPole: vec2f,
+                    eID: u32,
+                    coreCharge: f32,
+                    shellCharge: f32,
+                    atomicRadius: f32,
+                    scatRadius: f32,
+                    mass: f32,
+                    bindEnergy: f32,
+                    polarizability: f32,
+                    kinE: f32,
+                    potE: f32,
+                    temp: f32,
+                    pad2: f32,
+                };
+
+                struct BinData {
+                    size: u32,
+                    start: u32,
+                }
+
+                struct BHQuad {
+                    posCenter: vec2f,
+                    posCharge: f32,
+                    posCount: u32,
+                    negCenter: vec2f,
+                    negCharge: f32,
+                    negCount: u32,
+                    temp: f32,
+                    Efield: f32,
+                };
+
+                @group(0) @binding(0) var<uniform> globals : Globals;
+                @group(0) @binding(1) var<storage, read_write> quad : array<BHQuad> ;
+                @group(0) @binding(2) var<storage, read> electrons : array<Electron>;
+                @group(0) @binding(3) var<storage, read> bin : array<BinData> ;
+                @group(0) @binding(4) var<storage, read> atoms : array<Atom>;
+
+                fn part1by1(x: u32) -> u32 {
+                    var v = x & 0x0000ffffu;             
+                    v = (v | (v << 8u)) & 0x00ff00ffu;   
+                    v = (v | (v << 4u)) & 0x0f0f0f0fu;
+                    v = (v | (v << 2u)) & 0x33333333u;
+                    v = (v | (v << 1u)) & 0x55555555u;
+                    return v;
+                }
+
+                fn compact1by1(x: u32) -> u32 {
+                    var v = x & 0x55555555u;
+                    v = (v | (v >> 1u)) & 0x33333333u;
+                    v = (v | (v >> 2u)) & 0x0f0f0f0fu;
+                    v = (v | (v >> 4u)) & 0x00ff00ffu;  
+                    v = (v | (v >> 8u)) & 0x0000ffffu;
+                    return v;
+                }
+
+                fn posToMorton(pos: vec2f) -> u32 {
+
+                    let simMin = -globals.simHalf;
+                    let simSize = globals.simSize;
+
+                    let norm = (pos - simMin) / simSize;
+
+                    let x = u32(clamp(norm.x * f32(globals.gridRes.x), 0.0, f32(globals.gridRes.x-1)));
+                    let y = u32(clamp(norm.y * f32(globals.gridRes.y), 0.0, f32(globals.gridRes.y-1)));
+
+                    let mort = (part1by1(y) << 1u) | part1by1(x);
+
+                    return u32(mort);
+                }
+
+                fn mortonToPos(morton: u32) -> vec2f {
+
+                    let m = u32(morton);
+
+                    let x = compact1by1(m);
+                    let y = compact1by1(m >> 1u);
+
+                    let cell = vec2f(f32(x), f32(y));
+                    let cellSize = globals.simSize / vec2f(f32(globals.gridRes.x), f32(globals.gridRes.y));
+
+                    return (-globals.simHalf) + cell * cellSize + cellSize * 0.5;
+                }
+
+                fn posToAtomID(pos: vec2f) -> u32 {  
+                    let shiftedPos = pos + globals.simHalf;
+
+                    let rawCol = floor(shiftedPos.x / globals.latticeSpacing);
+                    let rawRow = floor(shiftedPos.y / globals.latticeSpacing);
+
+                    let col = u32(clamp(rawCol, 0.0, f32(globals.latticeSize.x - 1u)));
+                    let row = u32(clamp(rawRow, 0.0, f32(globals.latticeSize.y - 1u)));
+
+                    return row * globals.latticeSize.x + col;
+                }                  
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn clear(@builtin(global_invocation_id) id: vec3u) {
+                    let i = id.x;
+
+                    if (i >= arrayLength(&quad)) { return; }
+
+                    quad[i].posCenter = vec2f(0.0, 0.0);
+                    quad[i].posCharge = 0.0;
+                    quad[i].posCount = 0u;
+                    quad[i].negCenter = vec2f(0.0, 0.0);
+                    quad[i].negCharge = 0.0;
+                    quad[i].negCount = 0u;
+                    quad[i].temp = 0.0;
+                }
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn leaves(@builtin(global_invocation_id) id: vec3u) {
+                
+//safety check ignore
+                    let i = id.x; 
+                    if (i >= arrayLength(&bin)) { return; } 
+//safety check ignore
+
+                    let quadBase = (1u << (2u * globals.treeDepth)) - 1u;
+                    let quadID = (quadBase / 3u) + i;
+
+                    var posWieghtedSum = vec2f(0.0,0.0);
+                    var posChargeSum: f32 = 0.0;
+                    var posCount: u32 = 0u;
+                    var negWieghtedSum = vec2f(0.0,0.0);
+                    var negChargeSum: f32 = 0.0;
+                    var negCount: u32 = 0u;
+                    var temp: f32 = 0.0;
+
+                    let start = bin[i].start;
+                    let end = select(bin[i + 1u].start , arrayLength(&electrons) , i == arrayLength(&bin) - 1u);
+
+                    for(var j: u32 = start ; j < end; j = j + 1u){
+                        negWieghtedSum +=  electrons[j].pos * globals.eCharge;
+                        negChargeSum += globals.eCharge;
+                        negCount += 1u;
+                    }
+
+                    
+
+                    let leafCenter = mortonToPos(i);
+                    let centralAtomID = posToAtomID(leafCenter) ;
+                                            
+                    if (centralAtomID < globals.atomCount) {
+
+                        let centerCol = centralAtomID % globals.latticeSize.x;
+                        let centerRow = centralAtomID / globals.latticeSize.x;
+
+                        for(var r: i32 = -2; r <= 2; r += 1) {
+                            for(var c: i32 = -2 ; c <= 2; c += 1) {
+
+                                let checkCol = i32(centerCol) + c;
+                                let checkRow = i32(centerRow) + r;
+
+                                if (checkCol >= 0 && checkCol < i32(globals.latticeSize.x) && checkRow >= 0 && checkRow < i32(globals.latticeSize.y)) {
+                            
+                                    let atomID = u32(checkRow) * globals.latticeSize.x + u32(checkCol);
+
+                                    let atom = atoms[atomID];
+                                    if (posToMorton(atom.pos) == i){
+
+                                        if (atom.coreCharge >= 0){
+                                            posWieghtedSum +=  atom.pos * atom.coreCharge;
+                                            posChargeSum += atom.coreCharge;
+                                            posCount += 1u;
+                                            temp += atom.temp;
+                                        }else{
+                                            negWieghtedSum +=  atom.pos * atom.coreCharge;
+                                            negChargeSum += atom.coreCharge;
+                                            negCount += 1u;
+                                            temp += atom.temp;
+                                        }
+                                    }
+
+                                    if (posToMorton(atom.negPole) == i){
+                                        if (atom.shellCharge >= 0.0){
+                                            posWieghtedSum += atom.negPole * atom.shellCharge;
+                                            posChargeSum += atom.shellCharge;
+                                            posCount += 1u;
+                                        } else {
+                                            negWieghtedSum += atom.negPole * atom.shellCharge;
+                                            negChargeSum += atom.shellCharge;
+                                            negCount += 1u;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                                    
+                    
+                    if (posChargeSum > 0.0) {
+                        quad[quadID].posCenter = posWieghtedSum / posChargeSum;
+                    }else {
+                        quad[quadID].posCenter = vec2f(0.0, 0.0);
+                    } 
+                
+                    quad[quadID].posCharge = posChargeSum;
+                    quad[quadID].posCount = posCount;
+
+                    if (negChargeSum < 0.0) {
+                        quad[quadID].negCenter = negWieghtedSum / negChargeSum;
+                    }else {
+                        quad[quadID].negCenter = vec2f(0.0, 0.0);
+                    }
+                
+                    quad[quadID].negCharge = negChargeSum;
+                    quad[quadID].negCount = negCount;
+                    quad[quadID].temp = temp;
+                
+                }
+
+                @compute @workgroup_size(${WORKGROUP_SIZE})
+                fn branch(@builtin(global_invocation_id) id: vec3u) {
+                
+//safety check ignore
+                    let i = id.x; 
+                    if (i >= globals.nodesThisLevel) { return; } 
+//safety check ignore
+
+                    let parentID = globals.levelOffset + i;
+                    let childBase = globals.childOffset + i * 4u;
+                    
+                    var posWieghtedSum = vec2f(0.0,0.0);
+                    var posChargeSum: f32 = 0.0;
+                    var posCount: u32 = 0u;
+                    var negWieghtedSum = vec2f(0.0,0.0);
+                    var negChargeSum: f32 = 0.0;
+                    var negCount: u32 = 0u;
+                    var temp: f32 = 0.0;
+
+                    for (var c: u32 = 0u; c < 4u; c++) {
+
+                        let child = quad[childBase + c];
+
+                        if (child.posCount > 0u){
+                            posWieghtedSum +=  child.posCenter * child.posCharge;
+                            posChargeSum += child.posCharge;
+                            posCount += child.posCount;
+                        }
+
+                        if (child.negCount > 0u){
+                            negWieghtedSum +=  child.negCenter * child.negCharge;
+                            negChargeSum += child.negCharge;
+                            negCount += child.negCount;
+                        }
+
+                        temp += child.temp;
+                    }
+
+                    if (posChargeSum > 0.0) {
+                        quad[parentID].posCenter = posWieghtedSum / posChargeSum;
+                    }else {
+                        quad[parentID].posCenter = vec2f(0.0, 0.0);
+                    }
+                
+                    quad[parentID].posCharge = posChargeSum;
+                    quad[parentID].posCount = posCount;
+
+                    if (negChargeSum < 0.0) {
+                        quad[parentID].negCenter = negWieghtedSum / negChargeSum;
+                    }else {
+                        quad[parentID].negCenter = vec2f(0.0, 0.0);
+                    }
+                
+                    quad[parentID].negCharge = negChargeSum;
+                    quad[parentID].negCount = negCount;
+                    quad[parentID].temp = temp/4;
+                }
+
+            `
+        });
+
+    
+
+    /*DRAW SHADER
+    
+    */
+        
+        const RenderShaderModule = device.createShaderModule({
+            label: "render shader",
+            code: `
+
+                struct VertexInput {
+                    @location(0) pos: vec2f,
+                    @builtin(instance_index) instance: u32,
+                };
+
+                struct VertexOutput {
+                    @builtin(position) pos: vec4f,
+                    @location(0) uv: vec2f,
+                    @location(1) @interpolate(flat) instanceID : u32,
+                };
+
+                struct Globals {
+                    deltaTime: f32,
+                    seed: f32,
+                    pixelSize: f32,
+                    cellSize: f32,
+                    simSize: vec2f,
+                    simHalf: vec2f,
+                    gridRes: vec2u,
+                    eMass: f32,
+                    eCharge: f32,
+                    eRadius: f32,
+                    eVisRadius: f32,
+                    treeDepth: u32,
+                    currentLevel: u32,
+                    levelOffset: u32,
+                    childOffset: u32,
+                    nodesThisLevel: u32,
+                    leafOffset: u32,
+                    draw_grid_depth: u32,
+                    draw_grid_start: u32,
+                    EMPTY2: u32,
+                    atomCount: u32,
+                    atomVisRadius: f32,
+                    latticeSpacing: f32,
+                    latticeSize: vec2u,
+                };
+
+                struct Electron {
+                    pos: vec2f,
+                    vel: vec2f,
+                    mortID: u32,
+                    localID: u32,
+                    atomID: u32,
+                    pad2: f32,
+                };
+
+                struct Atom {
+                    initPos: vec2f,
+                    pos: vec2f,
+                    velXu: u32,
+                    velYu: u32,
+                    negPole: vec2f,
+                    eID: u32,
+                    coreCharge: f32,
+                    shellCharge: f32,
+                    atomicRadius: f32,
+                    scatRadius: f32,
+                    mass: f32,
+                    bindEnergy: f32,
+                    polarizability: f32,
+                    kinE: f32,
+                    potE: f32,
+                    temp: f32,
+                    pad2: f32,
+                };
+
+                struct BHQuad {
+                    posCenter: vec2f,
+                    posCharge: f32,
+                    posCount: u32,
+                    negCenter: vec2f,
+                    negCharge: f32,
+                    negCount: u32,
+                    temp: f32,
+                    pad: f32,
+                };
+
+                @group(0) @binding(0) var<uniform> globals : Globals;
+                @group(0) @binding(1) var<storage, read> electrons: array<Electron>;
+                @group(0) @binding(2) var<storage, read> quad : array<BHQuad>;
+                @group(0) @binding(3) var<storage, read> atoms: array<Atom>;
+
+
+                fn part1by1(x: u32) -> u32 {
+                    var v = x & 0xffu;
+                    v = (v | (v << 4u)) & 0x0f0f0f0fu;
+                    v = (v | (v << 2u)) & 0x33333333u;
+                    v = (v | (v << 1u)) & 0x55555555u;
+                    return v;
+                }
+
+                fn compact1by1(x: u32) -> u32 {
+                    var v = x & 0x55555555u;
+                    v = (v | (v >> 1u)) & 0x33333333u;
+                    v = (v | (v >> 2u)) & 0x0f0f0f0fu;
+                    v = (v | (v >> 4u)) & 0x00ff00ffu;
+                    v = (v | (v >> 8u)) & 0x0000ffffu;
+                    return v;
+                }
+
+                fn posToMorton(pos: vec2f) -> u32 {
+
+                    let simMin = -globals.simHalf;
+                    let simSize = globals.simSize;
+
+                    let norm = (pos - simMin) / simSize;
+
+                    let x = u32(clamp(norm.x * f32(globals.gridRes.x), 0.0, f32(globals.gridRes.x-1)));
+                    let y = u32(clamp(norm.y * f32(globals.gridRes.y), 0.0, f32(globals.gridRes.y-1)));
+
+                    let mort = (part1by1(y) << 1u) | part1by1(x);
+
+                    return u32(mort);
+                }
+
+                fn mortonToPos(morton: u32) -> vec2f {
+
+                    let m = u32(morton);
+
+                    let x = compact1by1(m);
+                    let y = compact1by1(m >> 1u);
+
+                    let cell = vec2f(f32(x), f32(y));
+                    let cellSize = globals.simSize / vec2f(f32(globals.gridRes.x), f32(globals.gridRes.y));
+
+                    return (-globals.simHalf) + cell * cellSize + cellSize * 0.5;
+                }
+// CELL VERTEX SHADER
+                @vertex
+                fn vertexCell(input: VertexInput, @builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+                    var output: VertexOutput;  
+                    
+                    let level = globals.draw_grid_depth;
+                    let nodesPerAxis = 1u << level;
+                    let nodeIndex = input.instance;
+                    let x = compact1by1(nodeIndex);
+                    let y = compact1by1(nodeIndex >> 1u);
+                    let cellSize = globals.simSize / vec2f(f32(nodesPerAxis), f32(nodesPerAxis));
+                    let cellCenter = -globals.simHalf + (vec2f(f32(x), f32(y)) + 0.5) * cellSize;
+                    let pos = cellCenter + input.pos * (cellSize * 0.5);
+
+                    output.pos = vec4f(pos / globals.simHalf, 0.0, 1.0);
+                    output.uv = input.pos;
+                    output.instanceID = input.instance;
+
+                    return output;
+                }
+
+// CELL CHARGE FRAGMENT SHADER 
+                @fragment
+                fn fragmentCellCharge(input: VertexOutput) -> @location(0) vec4f {
+                    let dist = length(input.uv);
+                                            
+                    let mortID = globals.draw_grid_start + input.instanceID;
+                    var color = vec4f(0.0, 0.0, 0.0, 0.0);
+                    let netCharge = quad[mortID].posCharge + quad[mortID].negCharge;
+                    let temp = quad[mortID].temp;
+                    
+                    if (netCharge <= 0.0){
+
+                        var alpha: f32 = abs(f32(netCharge) / globals.eCharge) * ${BIN_ALPHA_FACTOR};
+                        var tempAlpha: f32 = f32(temp) * ${TEMP_ALPHA_FACTOR};
+
+                        if (alpha > 1.0){
+                            alpha = 1.0;
+                        }
+
+                        //color = vec4f(0.0, min(1.0,tempAlpha), 1.0, alpha);
+                        color = vec4f(0.0, 0.0, 1.0, alpha);
+                    }else{
+                    
+                        var alpha: f32 = abs(f32(netCharge)/globals.eCharge) * ${BIN_ALPHA_FACTOR};
+                        var tempAlpha: f32 = f32(temp) * ${TEMP_ALPHA_FACTOR};
+
+                        if (alpha > 1.0){
+                            alpha = 1.0;
+                        }
+
+                        //color = vec4f(1.0, min(1.0,tempAlpha), 0.0, alpha);
+                        color = vec4f(1.0, 0.0, 0.0, alpha);
+
+                    }
+                    
+                    return color;
+                }
+
+// CELL COUNT FRAGMENT SHADER 
+                @fragment
+                fn fragmentCellCount(input: VertexOutput) -> @location(0) vec4f {
+                    let dist = length(input.uv);
+                                            
+                    let mortID = globals.draw_grid_start + input.instanceID;
+                    let netCount = quad[mortID].posCount + quad[mortID].negCount;
+
+                    var alpha: f32 = f32(netCount) * ${BIN_ALPHA_FACTOR};
+
+                    if (alpha > 1.0){
+                        alpha = 1.0;
+                    }
+
+                    return vec4f(1.0, 0.0, 0.0, alpha);
+                }
+
+// CELL TEMP FRAGMENT SHADER 
+                @fragment
+                fn fragmentCellTemp(input: VertexOutput) -> @location(0) vec4f {
+                    let dist = length(input.uv);
+                                            
+                    let mortID = globals.draw_grid_start + input.instanceID;
+                    let temp = quad[mortID].temp;
+
+                    var alpha: f32 = f32(temp) * ${TEMP_ALPHA_FACTOR};
+
+                    if (alpha > 1.0){
+                        alpha = 1.0;
+                    }
+
+                    return vec4f(1.0, 0.0, 0.0, alpha);
+                }
+
+
+// ATOM VERTEX SHADER
+                @vertex
+                fn vertexAtom(input: VertexInput, @builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+                    var output: VertexOutput;  
+
+                    let atom = atoms[input.instance];
+                    let pos = atom.pos + input.pos * globals.atomVisRadius ;
+                    
+                    output.pos = vec4f(pos / globals.simHalf , 0.0, 1.0);
+                    output.uv = input.pos;
+                    output.instanceID = input.instance;
+                    return output;
+                }
+
+
+// ATOM FRAGMENT SHADER
+                @fragment
+                fn fragmentAtom(input: VertexOutput) -> @location(0) vec4f {
+                    let dist = length(input.uv);
+                    let atom = atoms[input.instanceID];
+                    
+                    let radius: f32 = .5; 
+                    let fadeWidth: f32 = .0; 
+
+                    let alpha = 1.0 - smoothstep(radius - fadeWidth, radius, dist);
+                    var color = vec4f(1.0, 0.0, 0.0, alpha);
+
+                    if (atom.eID > ${NUM_OF_ELECTRONS}){
+                        return color;
+                    }else{
+                        return vec4f(1.0, 1.0, 1.0, alpha);
+                    }
+                    
+                    
+                }
+
+
+// ELECTRON VERTEX SHADER
+                @vertex
+                fn vertexElectron(input: VertexInput, @builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+                    var output: VertexOutput;  
+
+                    let electron = electrons[input.instance];
+                    let pos = electron.pos + input.pos * globals.eVisRadius ;
+                    
+                    output.pos = vec4f(pos / globals.simHalf , 0.0, 1.0);
+                    output.uv = input.pos;
+                    output.instanceID = input.instance;
+                    return output;
+                }
+
+
+// PRETTIER SLOWER ELECTRONS
+                @fragment
+                fn fragmentElectron(input: VertexOutput) -> @location(0) vec4f {
+
+                        
+                    
+                    if (electrons[input.instanceID].atomID >=  ${NUM_OF_ATOMS} ){
+                    
+                        let dist = length(input.uv);
+                    
+                        let radius: f32 = .5; 
+                        let fadeWidth: f32 = .001; 
+
+                        let alpha = 1.0 - smoothstep(radius - fadeWidth, radius, dist);
+                        
+                        if alpha < 0.001 {
+                            discard;
+                        }
+
+                        if(electrons[input.instanceID].pad2 == 1){
+                            return vec4f(0.0, 0.5, 0.5, alpha);
+                        }else{
+                            return vec4f(0.5, 0.5, 0.5, alpha);
+                        }
+                        
+                        
+
+                    }else{
+                        let dist = length(input.uv);
+                        let radius2start: f32 = 0.7; 
+                        let radius2end: f32 = 0.5; 
+                        let fadeWidth2: f32 = 0.01;
+                        let alpha2 = 1.0 - smoothstep(radius2end - fadeWidth2, radius2end, dist);
+                        return vec4f(1.0, 0.0, 1.0, alpha2);
+                    }
+                    
+                }
+            `
+        });
+
+
+//PIPLINES
+
+    /*RENDER PIPELINE
+    
+    */
+
+        var cellEntryPoint = "";
+
+        switch(cellType) {
+            case "char":
+                cellEntryPoint = "fragmentCellCharge";
+                break;
+            case "cunt":
+                cellEntryPoint = "fragmentCellCount";
+                break;
+            case "temp":
+                cellEntryPoint = "fragmentCellTemp";
+                break;
+            default:
+                cellEntryPoint = 'fragmentCellCount';
+        }
+
+        const CellRenderPipeline = device.createRenderPipeline({
+            label: "cell render pipeline",
+            layout: RenderPipelineLayout,
+            vertex: {
+                module: RenderShaderModule,
+                entryPoint: "vertexCell",
+                buffers: [vertexBufferLayout]
+            },
+            fragment: {
+                module: RenderShaderModule,
+                entryPoint: cellEntryPoint,
+                targets: [{
+                    format: simCanvasFormat,
+                    blend: { 
+                        color: {
+                            srcFactor: "src-alpha",
+                            dstFactor: "one-minus-src-alpha",
+                            operation: "add"
+                        },
+                        alpha: {
+                            srcFactor: "one",
+                            dstFactor: "one-minus-src-alpha",
+                            operation: "add"
+                        }
+                    }
+                }]
+            }
+        });
+
+        const AtomRenderPipeline = device.createRenderPipeline({
+            label: "atom render pipeline",
+            layout: RenderPipelineLayout,
+            vertex: {
+                module: RenderShaderModule,
+                entryPoint: "vertexAtom",
+                buffers: [vertexBufferLayout]
+            },
+            fragment: {
+                module: RenderShaderModule,
+                entryPoint:"fragmentAtom",
+                targets: [{
+                    format: simCanvasFormat,
+                    blend: { 
+                        color: {
+                            srcFactor: "src-alpha",
+                            dstFactor: "one-minus-src-alpha",
+                            operation: "add"
+                        },
+                        alpha: {
+                            srcFactor: "one",
+                            dstFactor: "one-minus-src-alpha",
+                            operation: "add"
+                        }
+                    }
+                }]
+            }
+        });
+
+        const ElectronRenderPipeline = device.createRenderPipeline({
+            label: "cell render pipeline",
+            layout: RenderPipelineLayout,
+            vertex: {
+                module: RenderShaderModule,
+                entryPoint: "vertexElectron",
+                buffers: [vertexBufferLayout]
+            },
+            fragment: {
+                module: RenderShaderModule,
+                entryPoint: "fragmentElectron",
+                targets: [{
+                    format: simCanvasFormat,
+                    blend: { 
+                        color: {
+                            srcFactor: "src-alpha",
+                            dstFactor: "one-minus-src-alpha",
+                            operation: "add"
+                        },
+                        alpha: {
+                            srcFactor: "one",
+                            dstFactor: "one-minus-src-alpha",
+                            operation: "add"
+                        }
+                    }
+                }]
+            }
+        });
+
+
+    /*SIMULATION PIPELINE
+    
+    */
+
+        const FirstDynamicPipeline = device.createComputePipeline({
+                label: "first dynamic compute pipeline",
+                layout: ComputePipelineLayout,
+                compute: {
+                    module: ComputeShaderModule ,
+                    entryPoint: "firstDynamic",
+                }
+        });
+
+        const Pass1BlockScanPipeline = device.createComputePipeline({
+                label: "Pass 1: Block Scan",
+                layout: SortPipelineLayout,
+                compute: {
+                    module: SortShaderModule ,
+                    entryPoint: "pass1_block_scan",
+                }
+        });
+
+        const Pass2ScanBlocksPipeline = device.createComputePipeline({
+                label: "Pass 2: Scan Blocks",
+                layout: SortPipelineLayout,
+                compute: {
+                    module: SortShaderModule ,
+                    entryPoint: "pass2_scan_blocks",
+                }
+        });
+
+        const Pass3AddBlocksPipeline = device.createComputePipeline({
+                label: "Pass 3: Add Blocks",
+                layout: SortPipelineLayout,
+                compute: {
+                    module: SortShaderModule ,
+                    entryPoint: "pass3_add_blocks",
+                }
+        });
+
+        const ClearBinsPipeline = device.createComputePipeline({
+                label: "clear bins and shit idk",
+                layout: SortPipelineLayout,
+                compute: {
+                    module: SortShaderModule ,
+                    entryPoint: "clearBins",
+                }
+        });
+
+        const CreateMovementArrayPipeline = device.createComputePipeline({
+                label: "organize particle in holder array",
+                layout: SortPipelineLayout,
+                compute: {
+                    module: SortShaderModule ,
+                    entryPoint: "createMovementArray",
+                }
+        });
+
+        const SwapPipeline = device.createComputePipeline({
+                label: "swap particles with holder array",
+                layout: SortPipelineLayout,
+                compute: {
+                    module: SortShaderModule ,
+                    entryPoint: "swap",
+                }
+        });
+
+        const BHQuadClearPipeline = device.createComputePipeline({
+            label: "clear barnes-hut bins",
+            layout: BHQuadPipelineLayout,
+            compute: {
+                module: BHQuadShaderModule ,
+                entryPoint: "clear",
+            }
+        });
+
+        const BHQuadLeafPipeline = device.createComputePipeline({
+                label: "barnes-hut leaf nodes",
+                layout: BHQuadPipelineLayout,
+                compute: {
+                    module: BHQuadShaderModule ,
+                    entryPoint: "leaves",
+                }
+        });
+
+        const BHQuadBranchPipeline = device.createComputePipeline({
+                label: "barnes-hut branch nodes",
+                layout: BHQuadPipelineLayout,
+                compute: {
+                    module: BHQuadShaderModule ,
+                    entryPoint: "branch",
+                }
+        });
+
+        const UpdateAtomsPipeline = device.createComputePipeline({
+            label: "update atoms state pipeline",
+            layout: ComputePipelineLayout,
+            compute: {
+                module: ComputeShaderModule ,
+                entryPoint: "updateAtoms",
+            }
+        });
+
+        const CollisionPipeline = device.createComputePipeline({
+            label: "electron-atom collision pipeline",
+            layout: ComputePipelineLayout,
+            compute: {
+                module: ComputeShaderModule ,
+                entryPoint: "collision",
+            }
+        });
+
+        
+        const BinElectronsPipeline = device.createComputePipeline({
+            label: "atomic add local id pipeline",
+            layout: ComputePipelineLayout,
+            compute: {
+                module: ComputeShaderModule ,
+                entryPoint: "binElectrons",
+            }
+        });
+
+
+
+//MAIN FUNCTIONS
+
+    /*COMPUTE/UPDATE
+    
+    */
+        function update(){
+
+            f32[0] = ((dt_s + .006)/2) * timeFactor;
+            f32[1] = frameSeed;
+            f32[2] = PIXEL_SIZE_A;
+            f32[3] = gridCellSize_A;
+
+            f32[4] = simSize_A.x;
+            f32[5] = simSize_A.y;
+
+            f32[6] = simHalf_A.x;
+            f32[7] = simHalf_A.y;
+
+            u32[8] = gridSize_int.x;
+            u32[9] = gridSize_int.y;
+
+
+
+            device.queue.writeBuffer(globalsUniformBuffer, 0, globals);
+                        
+            const ComputeEncoder = device.createCommandEncoder();
+            const ComputePass = ComputeEncoder.beginComputePass();
+
+            ComputePass.setPipeline(ClearBinsPipeline);
+            ComputePass.setBindGroup(0, SortBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil( gridResolution / WORKGROUP_SIZE));
+
+            ComputePass.setPipeline(FirstDynamicPipeline);
+            ComputePass.setBindGroup(0, ComputeBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(Math.ceil(NUM_OF_ELECTRONS / WORKGROUP_SIZE)/DISPATCH_LAYERS),DISPATCH_LAYERS,1);
+
+            ComputePass.setPipeline(UpdateAtomsPipeline);
+            ComputePass.setBindGroup(0, ComputeBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(NUM_OF_ATOMS / WORKGROUP_SIZE));
+
+            ComputePass.setPipeline(CollisionPipeline);
+            ComputePass.setBindGroup(0, ComputeBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(Math.ceil(NUM_OF_ELECTRONS / WORKGROUP_SIZE)/DISPATCH_LAYERS),DISPATCH_LAYERS,1);
+
+            ComputePass.setPipeline(BinElectronsPipeline);
+            ComputePass.setBindGroup(0, ComputeBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(Math.ceil(NUM_OF_ELECTRONS / WORKGROUP_SIZE)/DISPATCH_LAYERS),DISPATCH_LAYERS,1);
+
+            ComputePass.setPipeline(Pass1BlockScanPipeline);
+            ComputePass.setBindGroup(0, SortBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(gridResolution / 256));
+
+            ComputePass.setPipeline(Pass2ScanBlocksPipeline);
+            ComputePass.setBindGroup(0, SortBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(1);
+
+            ComputePass.setPipeline(Pass3AddBlocksPipeline);
+            ComputePass.setBindGroup(0, SortBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(gridResolution / 256));
+
+            ComputePass.setPipeline(CreateMovementArrayPipeline);
+            ComputePass.setBindGroup(0, SortBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(Math.ceil(NUM_OF_ELECTRONS / WORKGROUP_SIZE)/DISPATCH_LAYERS),DISPATCH_LAYERS,1);
+
+            ComputePass.setPipeline(SwapPipeline);
+            ComputePass.setBindGroup(0, SortBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(Math.ceil(NUM_OF_ELECTRONS / WORKGROUP_SIZE)/DISPATCH_LAYERS),DISPATCH_LAYERS,1);
+
+            ComputePass.setPipeline(BHQuadClearPipeline);
+            ComputePass.setBindGroup(0, BHQuadBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(NUM_QUADS / WORKGROUP_SIZE));
+
+            ComputePass.setPipeline(BHQuadLeafPipeline);
+            ComputePass.setBindGroup(0, BHQuadBindGroups[step % 2]);
+            ComputePass.dispatchWorkgroups(Math.ceil(gridResolution / WORKGROUP_SIZE));
+
+            ComputePass.end();
+            device.queue.submit([ComputeEncoder.finish()]);
+
+            for (let level = treeDepth_int-1; level >= 0; level--) {
+
+                u32[15] = level;  //currentLevel
+
+                u32[16] = (4**level - 1) / 3; //levelOffset
+                u32[17] = ((4**(level + 1) - 1) / 3) ; //childOffset
+
+                u32[18] = Math.pow(4, level); //nodesThisLevel
+
+                device.queue.writeBuffer(globalsUniformBuffer, 0, globals);
+
+                const loopEncoder = device.createCommandEncoder();
+                const pass = loopEncoder.beginComputePass();
+
+                pass.setPipeline(BHQuadBranchPipeline);
+                pass.setBindGroup(0, BHQuadBindGroups[step % 2]);
+                pass.dispatchWorkgroups(Math.ceil( Math.pow(4, level) / WORKGROUP_SIZE));
+                
+                pass.end();
+                device.queue.submit([loopEncoder.finish()]);
+            }
+            
+
+
+        }
+
+    /*RENDER
+    
+    */
+        function render() {
+
+            const renderEncoder = device.createCommandEncoder();
+
+            var RenderPass;
+            if (TRACERS){
+                RenderPass = renderEncoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: persistentTexture.createView(), 
+                        loadOp: "load",
+                        storeOp: "store",
+                    }]
+                });
+            }else{
+                RenderPass = renderEncoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: persistentTexture.createView(), 
+                        loadOp: "clear",
+                        storeOp: "store",
+                    }]
+                });
+            }
+            
+            
+            
+
+            RenderPass.setBindGroup(0, RenderBindGroups[(step +1) % 2]);
+            RenderPass.setVertexBuffer(0, vertexBuffer);
+
+            if (DRAW_GRID){
+                RenderPass.setPipeline(CellRenderPipeline);
+                RenderPass.draw(6, Math.pow(4, DRAW_GRID_DEPTH), 0, 0);
+            } 
+
+            
+            if(draw_atoms){
+                RenderPass.setPipeline(AtomRenderPipeline);
+                RenderPass.draw(3, NUM_OF_ATOMS, 6, 0);
+            }
+            
+            if(draw_electrons){
+                RenderPass.setPipeline(ElectronRenderPipeline);
+                RenderPass.draw(3, NUM_OF_ELECTRONS, 6, 0); 
+            }
+
+
+            RenderPass.end();
+
+            const currentCanvasTexture = context.getCurrentTexture();
+            
+            renderEncoder.copyTextureToTexture(
+                { texture: persistentTexture },
+                { texture: currentCanvasTexture },
+                [simCanvas.width, simCanvas.height]
+            );
+
+            device.queue.submit([renderEncoder.finish()]);
+
+        }
+        
+
+
+//MAIN LOOP
+
+
+        function frame() {
+            frames++;
+
+            const NOW_MS = performance.now();
+            dt_ms = NOW_MS - lastT_ms;
+            lastT_ms = NOW_MS;
+            dt_s = dt_ms/1000;
+            fps = 1/dt_s;
+
+            fpsAccumulator += dt_ms;
+            frameCountForFps++;
+
+            if(SET_DT_S > 0){
+                dt_s = SET_DT_S
+            }
+
+            if (fpsAccumulator >= 100) {
+                fps = (frameCountForFps / fpsAccumulator) * 1000;
+                
+                fpsCounter.textContent = `FPS: ${fps.toFixed(2)} delT: ${dt_s.toFixed(4)}`;
+                
+                fpsAccumulator = 0;
+                frameCountForFps = 0;
+            }
+
+            
+        
+
+            //simCanvas.width = document.getElementById('simSpace').clientWidth ;
+            //simCanvas.height = document.getElementById('simSpace').clientHeight ;
+
+            //simSize_A.x = simCanvas.width * PIXEL_SIZE_A ;
+            //simSize_A.y = simCanvas.height * PIXEL_SIZE_A;
+
+            //conversionWidth = 2 / simSize_A.x ;
+            //conversionHeight = 2 / simSize_A.y ;
+
+            frameSeed = Math.random();
+
+
+            update();
+            render();
+
+
+            step++;
+
+            setTimeout(() => {requestAnimationFrame(frame);}, FRAME_DELAY_MS);
+            //requestAnimationFrame(frame);
+        }
+        
+        frame();
+
+
+
+    </script>
+</body>
+</html>
