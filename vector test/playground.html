@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+    <head>
+    </head>
+    <body>
+        <canvas></canvas>
+        <pre id="log"></pre>
+
+        <script>
+            const canvas = document.querySelector('canvas')
+            const c = canvas.getContext('2d')
+
+            canvas.width = innerWidth - 25;
+            canvas.height = innerHeight - 25;
+
+            const windowWidthMeter = .34 ;
+            const windowHeightMeter = .164 ;
+
+            const pixelWidth = windowWidthMeter/canvas.width;
+            const pixelHeight = windowHeightMeter/canvas.height;
+
+            const pixelSize = (pixelHeight+pixelWidth)/2;
+            //const pixelSize = 0.00020101509747341603;
+
+
+            console.log('canvas.width: '+canvas.width+'px canvas.height: '+canvas.height+'px');
+
+            console.log('single pixel width: ' +pixelWidth+'   single pixel height:'+pixelHeight);
+
+            console.log('pixel size: '+pixelSize);
+
+            let mouseButtons = [0,0,0,0,0];
+            let mousePosition = [0,0];
+            let wheelPos = 0;
+            let deltaWheel = 0; 
+            let wheelDragStartPosition = [0,0];
+            let wheelDragDelta = [0,0];
+            const buttonNames = ["left", "wheel", "right", "back", "forward"];
+
+        </script>
+
+
+        <script>
+
+//  GET WHEEL POSITION
+            canvas.addEventListener("wheel" , function(evt){
+                event.preventDefault();
+                deltaWheel = event.deltaY/1000;
+                wheelPos += deltaWheel;
+                zoom = Math.pow(10,wheelPos);
+            })
+
+//  GET MOUSE POSITION
+            canvas.addEventListener('mousemove',function(evt){
+                var rect = canvas.getBoundingClientRect();
+                mousePosition = [evt.clientX - rect.left,evt.clientY - rect.top + 1];
+                console.log(mousePosition);
+
+                if (mouseButtons[1]){
+                    wheelDragDelta[0] = mousePosition[0] - wheelDragStartPosition[0];
+                    wheelDragDelta[1] = mousePosition[1] - wheelDragStartPosition[1];
+                };
+
+            });
+
+//  GET MOUSE BOTTONS
+    //  MOUSE DOWN
+            addEventListener('mousedown',function(){
+
+                event.preventDefault();
+
+                mouseButtons[event.button] = 1;
+
+                if (event.button == 1){
+                    wheelDragStartPosition[0] = mousePosition[0];
+                    wheelDragStartPosition[1] = mousePosition[1];
+                }
+
+            });
+
+    //  MOUSE UP
+            addEventListener('mouseup',function(){
+
+                event.preventDefault();
+
+                mouseButtons[event.button] = 0;
+
+            });
+
+//  MAIN LOOP            
+            function MainLoop(){
+                Sim.UpdateSimulation();
+                window.requestAnimationFrame(MainLoop);
+            }
+
+            Sim.InitSimulation();
+
+            MainLoop();
+
+            </script>
+    </body>
+</html>
